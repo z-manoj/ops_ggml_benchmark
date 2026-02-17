@@ -17,6 +17,8 @@ add_executable(ops_ggml_benchmark
     src/benchmark.cpp
     src/ggml_utils.cpp
     src/matmul_bench.cpp
+    src/layer_config.cpp
+    src/layer_bench.cpp
 )
 
 target_include_directories(ops_ggml_benchmark PRIVATE

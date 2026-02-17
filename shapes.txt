@@ -1,0 +1,6 @@
+# LLM-typical matmul shapes
+# M     N     K
+
+512 512 512
+1024 1024 1024
+4096x4096x4096

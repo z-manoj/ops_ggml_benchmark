@@ -24,6 +24,7 @@ All compute is performed by the existing GGML CPU kernels shipped with llama.cpp
 |----------------|---------------------|---------------------------------|
 | `matmul`       | `ggml_mul_mat`      | Dense matrix multiplication     |
 | `matmul_id`    | `ggml_mul_mat_id`   | Expert-routed matmul (MoE)      |
+| `layer`        | multi-node graph    | Full transformer layer GEMM workload |
 
 ## How to build
 
@@ -66,6 +67,13 @@ reuse the cached source.
 # Expert-routed matmul (MoE)
 ./build/ops_ggml_benchmark --op matmul_id --m 2048 --n 64 --k 2048 \
     --dtype f16 --threads 16
+
+# Layer-level benchmark (full transformer layer GEMM workload)
+./build/ops_ggml_benchmark --op layer --config configs/mixtral-8x7b.cfg \
+    --dtype f16 --threads 32 --repeats 50 --warmup 5
+
+./build/ops_ggml_benchmark --op layer --config configs/qwen3-coder-30b-a3b.cfg \
+    --dtype f16 --threads 32 --repeats 50 --warmup 5
 ```
 
 ### Batch file format
@@ -78,6 +86,62 @@ Blank lines and `#` comments are ignored.
 512 512 512
 1024 1024 1024
 4096x4096x4096
+```
+
+## Layer benchmark mode
+
+The `layer` operator builds a multi-node GGML graph representing all GEMM
+operations in a single transformer layer (attention projections + MoE expert
+matmuls). This captures realistic memory pressure, cache contention, and
+barrier overhead between sequential ops.
+
+Two model configs are included:
+
+| Config | Ops | Experts | Notes |
+|--------|-----|---------|-------|
+| `configs/mixtral-8x7b.cfg` | 8 | 8 total, 2 active | ~2.7 GB weights (f16) |
+| `configs/qwen3-coder-30b-a3b.cfg` | 8 | 128 total, 8 active | ~3.4 GB weights (f16) |
+
+### Config file format
+
+One op per line. `model_name` and `seq_len` are metadata headers.
+
+```
+# configs/mixtral-8x7b.cfg
+model_name  mixtral-8x7b-instruct
+seq_len     512
+
+mul_mat     attn_q        512  4096   4096
+mul_mat     attn_k        512  1024   4096
+mul_mat     attn_v        512  1024   4096
+mul_mat     attn_output   512  4096   4096
+mul_mat     ffn_gate_inp  512  8      4096
+mul_mat_id  ffn_gate_exp  512  14336  4096   8  2
+mul_mat_id  ffn_up_exp    512  14336  4096   8  2
+mul_mat_id  ffn_down_exp  512  4096   14336  8  2
+```
+
+- `mul_mat <label> <M> <N> <K>` -- dense matmul
+- `mul_mat_id <label> <M> <N> <K> <n_experts> <n_experts_used>` -- MoE expert-routed matmul
+
+### Layer output format
+
+```
+op: layer
+model: mixtral-8x7b-instruct
+dtype: f16
+threads: 32
+warmup: 5
+repeats: 50
+
+graph nodes: 8
+  [0] mul_mat      attn_q           m=512   n=4096  k=4096  (  17.18 GFLOPs)
+  [1] mul_mat      attn_k           m=512   n=1024  k=4096  (   4.29 GFLOPs)
+  ...
+total: 403.76 GFLOPs
+
+time(ms): min=12.34 avg=12.87 max=13.42
+throughput: 8.68 TFLOPS
 ```
 
 ## Example output
@@ -108,9 +172,10 @@ Each benchmark invocation follows a fixed sequence of phases:
    `matmul` creates tensors A `[K, M]` and B `[K, N]`; `matmul_id` also
    creates a 3D expert weight tensor and an integer routing-index tensor.
 
-3. **Graph construction** -- A single-node GGML compute graph is built
-   containing exactly one operator (e.g. `ggml_mul_mat`). No fusion, no
-   optimization passes -- just the raw primitive.
+3. **Graph construction** -- A GGML compute graph is built containing the
+   operator(s). For `matmul` and `matmul_id` this is a single node; for
+   `layer` mode, all ops from the config file are expanded into one graph.
+   No fusion, no optimization passes -- just the raw primitives.
 
 4. **Buffer allocation** -- A GGML graph allocator (`ggml_gallocr`) reserves
    and assigns memory for all tensor data through the CPU backend's default
@@ -141,9 +206,9 @@ Each benchmark invocation follows a fixed sequence of phases:
 
 | Aspect           | ops_ggml_benchmark     | llama-bench / model benchmarks |
 |------------------|------------------------|-------------------------------|
-| Scope            | Single operator        | Full model inference          |
+| Scope            | Single op or layer     | Full model inference          |
 | Dependencies     | GGML only              | Full llama.cpp + model files  |
-| Graph complexity | 1 compute node         | Hundreds of nodes             |
+| Graph complexity | 1-8 compute nodes      | Hundreds of nodes             |
 | Input data       | Synthetic / random     | Tokenized text                |
 | Purpose          | Kernel characterization| End-to-end throughput         |
 

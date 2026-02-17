@@ -1,6 +1,8 @@
 #include "op_desc.h"
 #include "benchmark.h"
 #include "ggml_utils.h"
+#include "layer_config.h"
+#include "layer_bench.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -85,7 +87,9 @@ static void print_usage(const char* prog) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
-        "  --op <matmul|matmul_id>   Operator to benchmark (default: matmul)\n"
+        "  --op <matmul|matmul_id|layer>\n"
+        "                            Operator to benchmark (default: matmul)\n"
+        "  --config <file>           Layer config file (required when --op layer)\n"
         "  --m <int>                 M dimension (default: 512)\n"
         "  --n <int>                 N dimension (default: 512)\n"
         "  --k <int>                 K dimension (default: 512)\n"
@@ -110,6 +114,7 @@ int main(int argc, char** argv) {
     std::vector<Shape> shapes;
     std::string batch_file;
     std::string shapes_arg;
+    std::string config_file;
 
     for (int i = 1; i < argc; i++) {
         auto arg = [&](const char* name) {
@@ -124,6 +129,7 @@ int main(int argc, char** argv) {
         };
 
         if (arg("--op"))      { base.op_name = next(); }
+        else if (arg("--config")) { config_file = next(); }
         else if (arg("--m"))  { base.m = atoi(next()); }
         else if (arg("--n"))  { base.n = atoi(next()); }
         else if (arg("--k"))  { base.k = atoi(next()); }
@@ -154,6 +160,20 @@ int main(int argc, char** argv) {
     if (base.threads <= 0) {
         fprintf(stderr, "error: thread count must be positive\n");
         return 1;
+    }
+
+    // --- Layer benchmark mode ---
+    if (base.op_name == "layer") {
+        if (config_file.empty()) {
+            fprintf(stderr, "error: --config <file> is required when --op layer\n");
+            return 1;
+        }
+        LayerConfig cfg = parse_layer_config(config_file);
+        LayerBenchResult result = bench_layer(cfg, base.dtype, base.threads,
+                                              base.warmup, base.repeats);
+        print_layer_results(cfg, result, base.dtype, base.threads,
+                            base.warmup, base.repeats);
+        return 0;
     }
 
     // Collect shapes from --batch and --shapes (they can be combined)
