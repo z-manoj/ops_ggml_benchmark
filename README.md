@@ -47,17 +47,37 @@ reuse the cached source.
 # Default: 512x512x512 f32 matmul
 ./build/ops_ggml_benchmark
 
-# Large f16 matmul on 32 threads
+# Single shape
 ./build/ops_ggml_benchmark --op matmul --m 4096 --n 4096 --k 4096 \
     --dtype f16 --threads 32 --repeats 100 --warmup 10
 
-# Smaller problem
-./build/ops_ggml_benchmark --op matmul --m 1024 --n 1024 --k 1024 \
-    --dtype f32 --threads 8
+# Multiple shapes on the CLI (comma-separated MxNxK)
+./build/ops_ggml_benchmark --op matmul --dtype f32 --threads 8 \
+    --shapes 512x512x512,1024x1024x1024,4096x4096x4096
+
+# Shapes from a batch file
+./build/ops_ggml_benchmark --op matmul --dtype f16 --threads 16 \
+    --batch shapes.txt
+
+# Combine both (batch file + CLI shapes run sequentially)
+./build/ops_ggml_benchmark --op matmul --dtype f32 --threads 8 \
+    --batch shapes.txt --shapes 2048x2048x2048
 
 # Expert-routed matmul (MoE)
 ./build/ops_ggml_benchmark --op matmul_id --m 2048 --n 64 --k 2048 \
     --dtype f16 --threads 16
+```
+
+### Batch file format
+
+One shape per line. Supports `M N K` (whitespace-separated) or `MxNxK`.
+Blank lines and `#` comments are ignored.
+
+```
+# shapes.txt -- LLM-typical matmul sizes
+512 512 512
+1024 1024 1024
+4096x4096x4096
 ```
 
 ## Example output
