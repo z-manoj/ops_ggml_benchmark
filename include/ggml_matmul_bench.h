@@ -8,7 +8,9 @@
 // Execute a ggml_mul_mat benchmark.
 // Creates tensors, builds a single-node GGML graph, and runs
 // warmup + timed iterations using the CPU backend.
-BenchResult bench_matmul(const OpDesc& desc);
+// GGML backend only.
+BenchResult bench_matmul_ggml(const OpDesc& desc);
 
 // Execute a ggml_mul_mat_id benchmark (MoE expert-routed matmul).
-BenchResult bench_matmul_id(const OpDesc& desc);
+// GGML backend only.
+BenchResult bench_matmul_id_ggml(const OpDesc& desc);

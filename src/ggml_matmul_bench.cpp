@@ -1,4 +1,4 @@
-#include "matmul_bench.h"
+#include "ggml_matmul_bench.h"
 #include "ggml_utils.h"
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -24,7 +24,7 @@
 // This matches the standard GEMM: C(M,N) = A^T(M,K) * B(K,N)
 // FLOPs = 2 * M * N * K
 // ---------------------------------------------------------------------------
-BenchResult bench_matmul(const OpDesc& desc) {
+BenchResult bench_matmul_ggml(const OpDesc& desc) {
     const int64_t M = desc.m;
     const int64_t N = desc.n;
     const int64_t K = desc.k;
@@ -126,7 +126,7 @@ BenchResult bench_matmul(const OpDesc& desc) {
 //
 // FLOPs approx = 2 * M * K * n_experts_used * N
 // ---------------------------------------------------------------------------
-BenchResult bench_matmul_id(const OpDesc& desc) {
+BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     const int64_t M = desc.m;
     const int64_t N = desc.n;           // number of tokens
     const int64_t K = desc.k;

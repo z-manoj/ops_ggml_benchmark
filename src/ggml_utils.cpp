@@ -5,14 +5,16 @@
 ggml_type parse_dtype(const std::string& s) {
     if (s == "f32")  return GGML_TYPE_F32;
     if (s == "f16")  return GGML_TYPE_F16;
+    if (s == "bf16") return GGML_TYPE_BF16;
     return GGML_TYPE_COUNT;
 }
 
 const char* dtype_to_string(ggml_type t) {
     switch (t) {
-        case GGML_TYPE_F32: return "f32";
-        case GGML_TYPE_F16: return "f16";
-        default:            return "unknown";
+        case GGML_TYPE_F32:  return "f32";
+        case GGML_TYPE_F16:  return "f16";
+        case GGML_TYPE_BF16: return "bf16";
+        default:             return "unknown";
     }
 }
 
@@ -44,6 +46,15 @@ void fill_tensor_deterministic(struct ggml_tensor* t, uint32_t seed) {
             uint32_t r = xorshift32(state);
             float val = static_cast<float>(static_cast<int32_t>(r)) / static_cast<float>(INT32_MAX);
             data[i] = ggml_fp32_to_fp16(val);
+        }
+    } else if (t->type == GGML_TYPE_BF16) {
+        ggml_bf16_t* data = reinterpret_cast<ggml_bf16_t*>(t->data);
+        const size_t n = n_bytes / sizeof(ggml_bf16_t);
+        uint32_t state = seed;
+        for (size_t i = 0; i < n; i++) {
+            uint32_t r = xorshift32(state);
+            float val = static_cast<float>(static_cast<int32_t>(r)) / static_cast<float>(INT32_MAX);
+            data[i] = ggml_fp32_to_bf16(val);
         }
     } else {
         // For other types, zero-fill as a safe fallback.

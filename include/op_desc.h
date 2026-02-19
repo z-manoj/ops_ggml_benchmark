@@ -8,6 +8,7 @@
 // operator benchmark invocation.
 struct OpDesc {
     std::string op_name;       // "matmul" or "matmul_id"
+    std::string backend = "ggml";  // "ggml" or "zendnn"
     int         m       = 512;
     int         n       = 512;
     int         k       = 512;

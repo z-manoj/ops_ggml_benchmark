@@ -97,7 +97,8 @@ static void print_usage(const char* prog) {
         "                            e.g. 4096x4096x4096,1024x1024x1024\n"
         "  --batch <file>            Read shapes from file (one per line)\n"
         "                            Lines: \"M N K\" or \"MxNxK\", # for comments\n"
-        "  --dtype <f32|f16>         Data type (default: f32)\n"
+        "  --dtype <f32|f16|bf16>    Data type (default: f32)\n"
+        "  --backend <ggml|zendnn>   Backend to use (default: ggml)\n"
         "  --threads <int>           Thread count (default: hw concurrency)\n"
         "  --repeats <int>           Timed iterations (default: 100)\n"
         "  --warmup <int>            Warmup iterations (default: 10)\n"
@@ -130,6 +131,7 @@ int main(int argc, char** argv) {
 
         if (arg("--op"))      { base.op_name = next(); }
         else if (arg("--config")) { config_file = next(); }
+        else if (arg("--backend")) { base.backend = next(); }
         else if (arg("--m"))  { base.m = atoi(next()); }
         else if (arg("--n"))  { base.n = atoi(next()); }
         else if (arg("--k"))  { base.k = atoi(next()); }
@@ -162,6 +164,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (base.backend != "ggml" && base.backend != "zendnn") {
+        fprintf(stderr, "error: unknown backend '%s' (must be 'ggml' or 'zendnn')\n", base.backend.c_str());
+        return 1;
+    }
+
+    // Validate dtype for ZenDNN backend
+    if (base.backend == "zendnn" && base.dtype == GGML_TYPE_F16) {
+        fprintf(stderr, "error: ZenDNN backend does not support f16 (only f32 and bf16 supported)\n");
+        return 1;
+    }
+
     // --- Layer benchmark mode ---
     if (base.op_name == "layer") {
         if (config_file.empty()) {
@@ -169,9 +182,22 @@ int main(int argc, char** argv) {
             return 1;
         }
         LayerConfig cfg = parse_layer_config(config_file);
-        LayerBenchResult result = bench_layer(cfg, base.dtype, base.threads,
-                                              base.warmup, base.repeats);
-        print_layer_results(cfg, result, base.dtype, base.threads,
+        LayerBenchResult result;
+
+        if (base.backend == "zendnn") {
+#ifdef ENABLE_ZENDNN
+            result = bench_layer_zendnn(cfg, base.dtype, base.threads,
+                                       base.warmup, base.repeats);
+#else
+            fprintf(stderr, "error: ZenDNN backend not enabled. Rebuild with -DENABLE_ZENDNN=ON\n");
+            return 1;
+#endif
+        } else {
+            result = bench_layer_ggml(cfg, base.dtype, base.threads,
+                                     base.warmup, base.repeats);
+        }
+
+        print_layer_results(cfg, result, base.backend, base.dtype, base.threads,
                             base.warmup, base.repeats);
         return 0;
     }
