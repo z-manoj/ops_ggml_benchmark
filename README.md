@@ -58,11 +58,11 @@ reuse the cached source.
 
 # Shapes from a batch file
 ./build/ops_ggml_benchmark --op matmul --dtype f16 --threads 16 \
-    --batch shapes.txt
+    --batch configs/shapes.txt
 
 # Combine both (batch file + CLI shapes run sequentially)
 ./build/ops_ggml_benchmark --op matmul --dtype f32 --threads 8 \
-    --batch shapes.txt --shapes 2048x2048x2048
+    --batch configs/shapes.txt --shapes 2048x2048x2048
 
 # Expert-routed matmul (MoE)
 ./build/ops_ggml_benchmark --op matmul_id --m 2048 --n 64 --k 2048 \

@@ -12,6 +12,8 @@ include(cmake/FetchLlamaCpp.cmake)
 # ---------------------------------------------------------------------------
 # Benchmark executable
 # ---------------------------------------------------------------------------
+find_package(OpenMP REQUIRED)
+
 add_executable(ops_ggml_benchmark
     src/main.cpp
     src/benchmark.cpp
@@ -19,14 +21,23 @@ add_executable(ops_ggml_benchmark
     src/matmul_bench.cpp
     src/layer_config.cpp
     src/layer_bench.cpp
+    src/custom/custom_moe.cpp
+    src/custom/custom_moe_bench.cpp
 )
 
 target_include_directories(ops_ggml_benchmark PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/custom
+)
+
+# AVX2+FMA+F16C for custom SIMD kernels
+set_source_files_properties(src/custom/custom_moe.cpp PROPERTIES
+    COMPILE_FLAGS "-mavx2 -mfma -mf16c"
 )
 
 # Link against GGML library targets provided by llama.cpp
 target_link_libraries(ops_ggml_benchmark PRIVATE
     ggml
     ggml-cpu
+    OpenMP::OpenMP_CXX
 )

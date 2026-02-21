@@ -3,6 +3,7 @@
 #include "ggml_utils.h"
 #include "layer_config.h"
 #include "layer_bench.h"
+#include "custom_moe_bench.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -87,9 +88,9 @@ static void print_usage(const char* prog) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
-        "  --op <matmul|matmul_id|layer>\n"
+        "  --op <matmul|matmul_id|layer|custom_moe|custom_layer>\n"
         "                            Operator to benchmark (default: matmul)\n"
-        "  --config <file>           Layer config file (required when --op layer)\n"
+        "  --config <file>           Layer config file (required for layer/custom_layer)\n"
         "  --m <int>                 M dimension (default: 512)\n"
         "  --n <int>                 N dimension (default: 512)\n"
         "  --k <int>                 K dimension (default: 512)\n"
@@ -171,6 +172,44 @@ int main(int argc, char** argv) {
         LayerConfig cfg = parse_layer_config(config_file);
         LayerBenchResult result = bench_layer(cfg, base.dtype, base.threads,
                                               base.warmup, base.repeats);
+        print_layer_results(cfg, result, base.dtype, base.threads,
+                            base.warmup, base.repeats);
+        return 0;
+    }
+
+    // --- Custom MoE standalone op ---
+    if (base.op_name == "custom_moe") {
+        if (shapes.empty()) shapes.push_back({base.m, base.n, base.k});
+        OpDesc desc = base;
+        desc.m = shapes[0].m;
+        desc.n = shapes[0].n;
+        desc.k = shapes[0].k;
+
+        BenchResult result = bench_custom_moe(desc);
+        printf("op: custom_moe (OpenMP)\n");
+        printf("dtype: %s\n", dtype_to_string(desc.dtype));
+        printf("shape: m=%d n=%d k=%d\n", desc.m, desc.n, desc.k);
+        printf("experts: %d total, %d used\n", desc.n_experts, desc.n_experts_used);
+        printf("threads: %d\n", desc.threads);
+        printf("warmup: %d\n", desc.warmup);
+        printf("repeats: %d\n", desc.repeats);
+        printf("\n");
+        printf("time(ms): min=%.2f avg=%.2f max=%.2f\n",
+               result.min_ms, result.avg_ms, result.max_ms);
+        printf("throughput: %.2f TFLOPS\n", result.tflops);
+        return 0;
+    }
+
+    // --- Custom layer (all ops via custom OpenMP kernels) ---
+    if (base.op_name == "custom_layer") {
+        if (config_file.empty()) {
+            fprintf(stderr, "error: --config <file> is required when --op custom_layer\n");
+            return 1;
+        }
+        LayerConfig cfg = parse_layer_config(config_file);
+        LayerBenchResult result = bench_custom_layer(cfg, base.dtype, base.threads,
+                                                     base.warmup, base.repeats);
+        printf("op: custom_layer (OpenMP)\n");
         print_layer_results(cfg, result, base.dtype, base.threads,
                             base.warmup, base.repeats);
         return 0;
