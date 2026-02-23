@@ -97,7 +97,9 @@ static void print_usage(const char* prog) {
         "                            e.g. 4096x4096x4096,1024x1024x1024\n"
         "  --batch <file>            Read shapes from file (one per line)\n"
         "                            Lines: \"M N K\" or \"MxNxK\", # for comments\n"
-        "  --dtype <f32|f16|bf16>    Data type (default: f32)\n"
+        "  --dtype <f32|f16|bf16|q8_0|q4_0>\n"
+        "                            Data type (default: f32)\n"
+        "                            q8_0/q4_0: quantized weights, f32 src (ggml only)\n"
         "  --backend <ggml|zendnn>   Backend to use (default: ggml)\n"
         "  --threads <int>           Thread count (default: hw concurrency)\n"
         "  --repeats <int>           Timed iterations (default: 100)\n"
@@ -107,6 +109,9 @@ static void print_usage(const char* prog) {
 }
 
 int main(int argc, char** argv) {
+    // Suppress GGML debug logs (repack messages, etc.)
+    suppress_ggml_debug_logs();
+
     OpDesc base;
     base.op_name = "matmul";
     base.threads = static_cast<int>(std::thread::hardware_concurrency());
@@ -172,6 +177,12 @@ int main(int argc, char** argv) {
     // Validate dtype for ZenDNN backend
     if (base.backend == "zendnn" && base.dtype == GGML_TYPE_F16) {
         fprintf(stderr, "error: ZenDNN backend does not support f16 (only f32 and bf16 supported)\n");
+        return 1;
+    }
+
+    // Validate quantized dtypes (only supported on GGML backend)
+    if ((base.dtype == GGML_TYPE_Q8_0 || base.dtype == GGML_TYPE_Q4_0) && base.backend != "ggml") {
+        fprintf(stderr, "error: quantized dtypes (q8_0, q4_0) are only supported on ggml backend\n");
         return 1;
     }
 

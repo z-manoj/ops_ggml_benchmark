@@ -16,15 +16,20 @@
 
 // Estimate total weight memory in bytes for the layer config.
 static size_t estimate_weight_bytes_ggml(const LayerConfig& cfg, ggml_type dtype) {
-    const size_t elem_size = ggml_type_size(dtype);
+    // For quantized types, ggml_type_size returns bytes per block, not per element.
+    // We need to account for the block size.
+    const size_t type_size = ggml_type_size(dtype);    // bytes per block
+    const int64_t blck_size = ggml_blck_size(dtype);    // elements per block
+    const double bytes_per_elem = (double)type_size / blck_size;
+
     size_t total = 0;
     for (const auto& op : cfg.ops) {
         if (op.op_type == "mul_mat") {
             // A: [K, N] weight matrix
-            total += (size_t)op.k * op.n * elem_size;
+            total += (size_t)((double)op.k * op.n * bytes_per_elem);
         } else {
             // as: [K, N, n_experts]
-            total += (size_t)op.k * op.n * op.n_experts * elem_size;
+            total += (size_t)((double)op.k * op.n * op.n_experts * bytes_per_elem);
         }
     }
     return total;
@@ -187,21 +192,46 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
         result.total_gflops += gflops;
     }
 
-    // Allocate buffers
-    ggml_gallocr_t allocr = ggml_gallocr_new(
-        ggml_backend_get_default_buffer_type(backend));
+    // Allocate buffers - for q4_0, try to use repack buffer type for q4_0x8 optimization
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    bool using_repack = false;
+
+    if (dtype == GGML_TYPE_Q4_0) {
+        ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
+        if (cpu_dev) {
+            ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
+            if (cpu_reg) {
+                typedef ggml_backend_buffer_type_t * (*ggml_backend_dev_get_extra_bufts_t)(ggml_backend_dev_t);
+                auto get_extra_bufts = (ggml_backend_dev_get_extra_bufts_t)
+                    ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_dev_get_extra_bufts");
+
+                if (get_extra_bufts) {
+                    ggml_backend_buffer_type_t * extra_bufts = get_extra_bufts(cpu_dev);
+                    if (extra_bufts && *extra_bufts) {
+                        buft = *extra_bufts;  // Use first extra buffer type (repack)
+                        using_repack = true;
+                    }
+                }
+            }
+        }
+    }
+
+    ggml_gallocr_t allocr = ggml_gallocr_new(buft);
     if (!ggml_gallocr_alloc_graph(allocr, graph)) {
         fprintf(stderr, "[GGML] error: graph allocation failed\n");
         exit(1);
     }
 
     // Fill tensors
+    // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
     for (const auto& fi : fill_list) {
         if (fi.is_routing_ids) {
             fill_routing_ids(fi.tensor, fi.n_experts, fi.n_experts_used,
                              fi.n_tokens, fi.seed);
         } else {
-            fill_tensor_deterministic(fi.tensor, fi.seed);
+            // Use backend_set for weight tensors (type matches dtype) when using repack
+            bool is_weight = (fi.tensor->type == dtype);
+            fill_tensor_deterministic(fi.tensor, fi.seed, using_repack && is_weight);
         }
     }
 

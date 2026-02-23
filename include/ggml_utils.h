@@ -12,4 +12,9 @@ const char* dtype_to_string(ggml_type t);
 
 // Fill a tensor with deterministic pseudo-random float data.
 // The tensor must already have its data buffer allocated.
-void fill_tensor_deterministic(struct ggml_tensor* t, uint32_t seed);
+// If use_backend_set is true, uses ggml_backend_tensor_set() to trigger
+// repack buffer conversions (q4_0 → q4_0x8).
+void fill_tensor_deterministic(struct ggml_tensor* t, uint32_t seed, bool use_backend_set = false);
+
+// Suppress GGML debug logging (repack messages, etc.)
+void suppress_ggml_debug_logs();

@@ -69,16 +69,40 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     ggml_build_forward_expand(graph, c);
 
     // 5. Allocate tensor buffers via graph allocator
-    ggml_gallocr_t allocr = ggml_gallocr_new(
-        ggml_backend_get_default_buffer_type(backend));
+    // For q4_0, try to use repack buffer type for q4_0x8 optimization
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    bool using_repack = false;
+
+    if (dtype == GGML_TYPE_Q4_0) {
+        ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
+        if (cpu_dev) {
+            ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
+            if (cpu_reg) {
+                typedef ggml_backend_buffer_type_t * (*ggml_backend_dev_get_extra_bufts_t)(ggml_backend_dev_t);
+                auto get_extra_bufts = (ggml_backend_dev_get_extra_bufts_t)
+                    ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_dev_get_extra_bufts");
+
+                if (get_extra_bufts) {
+                    ggml_backend_buffer_type_t * extra_bufts = get_extra_bufts(cpu_dev);
+                    if (extra_bufts && *extra_bufts) {
+                        buft = *extra_bufts;  // Use first extra buffer type (repack)
+                        using_repack = true;
+                    }
+                }
+            }
+        }
+    }
+
+    ggml_gallocr_t allocr = ggml_gallocr_new(buft);
     if (!ggml_gallocr_alloc_graph(allocr, graph)) {
         fprintf(stderr, "error: graph allocation failed\n");
         exit(1);
     }
 
     // 6. Fill inputs with deterministic data
-    fill_tensor_deterministic(a, 42);
-    fill_tensor_deterministic(b, 137);
+    // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
+    fill_tensor_deterministic(a, 42, using_repack);
+    fill_tensor_deterministic(b, 137, false);  // b is always F32, no repack needed
 
     // 7. Warmup
     for (int i = 0; i < desc.warmup; i++) {
@@ -176,16 +200,40 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     struct ggml_cgraph* graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, c);
 
-    ggml_gallocr_t allocr = ggml_gallocr_new(
-        ggml_backend_get_default_buffer_type(backend));
+    // For q4_0, try to use repack buffer type for q4_0x8 optimization
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
+    bool using_repack = false;
+
+    if (dtype == GGML_TYPE_Q4_0) {
+        ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
+        if (cpu_dev) {
+            ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
+            if (cpu_reg) {
+                typedef ggml_backend_buffer_type_t * (*ggml_backend_dev_get_extra_bufts_t)(ggml_backend_dev_t);
+                auto get_extra_bufts = (ggml_backend_dev_get_extra_bufts_t)
+                    ggml_backend_reg_get_proc_address(cpu_reg, "ggml_backend_dev_get_extra_bufts");
+
+                if (get_extra_bufts) {
+                    ggml_backend_buffer_type_t * extra_bufts = get_extra_bufts(cpu_dev);
+                    if (extra_bufts && *extra_bufts) {
+                        buft = *extra_bufts;  // Use first extra buffer type (repack)
+                        using_repack = true;
+                    }
+                }
+            }
+        }
+    }
+
+    ggml_gallocr_t allocr = ggml_gallocr_new(buft);
     if (!ggml_gallocr_alloc_graph(allocr, graph)) {
         fprintf(stderr, "error: graph allocation failed\n");
         exit(1);
     }
 
     // Fill expert weights and input
-    fill_tensor_deterministic(as, 42);
-    fill_tensor_deterministic(b, 137);
+    // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
+    fill_tensor_deterministic(as, 42, using_repack);
+    fill_tensor_deterministic(b, 137, false);  // b is always F32, no repack needed
 
     // Fill routing ids: cycle through experts deterministically
     {
