@@ -74,6 +74,9 @@ static void fill_routing_ids(struct ggml_tensor* ids, int n_experts,
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
                                   ggml_type dtype, int threads,
                                   int warmup, int repeats) {
+    // Track timing breakdowns
+    auto t_ctx_start = std::chrono::steady_clock::now();
+
     // Init CPU backend
     ggml_backend_t backend = ggml_backend_cpu_init();
     if (!backend) {
@@ -106,7 +109,11 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
         exit(1);
     }
 
+    auto t_ctx_end = std::chrono::steady_clock::now();
+    double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
+
     // Build graph
+    auto t_op_start = std::chrono::steady_clock::now();
     struct ggml_cgraph* graph = ggml_new_graph(ctx);
 
     struct TensorFillInfo {
@@ -235,6 +242,9 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
         }
     }
 
+    auto t_op_end = std::chrono::steady_clock::now();
+    double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
+
     // Warmup
     for (int i = 0; i < warmup; i++) {
         ggml_backend_graph_compute(backend, graph);
@@ -266,6 +276,12 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
     result.avg_ms = avg_ms;
     result.max_ms = max_ms;
     result.tflops = (result.total_gflops * 1e9) / (avg_ms * 1e-3) / 1e12;
+
+    // Set timing breakdowns (all per-iteration averages)
+    result.ctx_creation_ms = ctx_creation_ms;
+    result.op_creation_ms = op_creation_ms;
+    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.other_ms = 0.0;
 
     // Estimate per-op times (proportional to GFLOPs)
     for (size_t i = 0; i < result.ops.size(); i++) {

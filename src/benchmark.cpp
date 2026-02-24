@@ -8,6 +8,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <sys/stat.h>
 
 BenchResult run_benchmark(const OpDesc& desc) {
     // Route to backend-specific implementation
@@ -42,14 +45,75 @@ BenchResult run_benchmark(const OpDesc& desc) {
 }
 
 void print_results(const OpDesc& desc, const BenchResult& result) {
-    printf("op: %s\n", desc.op_name.c_str());
-    printf("backend: %s\n", desc.backend.c_str());
-    printf("dtype: %s\n", dtype_to_string(desc.dtype));
-    printf("shape: m=%d n=%d k=%d\n", desc.m, desc.n, desc.k);
-    printf("threads: %d\n", desc.threads);
-    printf("warmup: %d\n", desc.warmup);
-    printf("repeats: %d\n", desc.repeats);
+    // ZenDNN benchdnn-inspired tabular format with per-iteration averages
+    // Header
+    printf("%-8s %-6s %-6s %-6s %-6s %-15s %-8s %-18s %-20s %-20s %-18s %-10s\n",
+           "Backend", "M", "N", "K", "Iters", "Data_type", "Threads",
+           "Avg_total(ms)", "Avg_ctx_init(ms)", "Avg_op_setup(ms)", "Avg_exec(ms)", "GFLOPS");
+
+    // Calculate GFLOPS
+    double flops = 2.0 * desc.m * desc.n * desc.k;
+    double gflops = flops / (result.avg_ms * 1e-3) / 1e9;
+
+    // Amortize one-time costs across all iterations for fair comparison
+    double avg_ctx_per_iter = result.ctx_creation_ms / desc.repeats;
+    double avg_setup_per_iter = result.op_creation_ms / desc.repeats;
+    double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + result.avg_ms;
+
+    // Data row
+    printf("%-8s %-6d %-6d %-6d %-6d %-15s %-8d %-18.2f %-20.2f %-20.2f %-18.2f %-18.2f\n",
+           desc.backend.c_str(),
+           desc.m, desc.n, desc.k,
+           desc.repeats,
+           dtype_to_string(desc.dtype),
+           desc.threads,
+           avg_total_per_iter,
+           avg_ctx_per_iter,
+           avg_setup_per_iter,
+           result.avg_ms,
+           gflops);
+
     printf("\n");
-    printf("time(ms): min=%.2f avg=%.2f max=%.2f\n",
-           result.min_ms, result.avg_ms, result.max_ms);
+}
+
+void write_csv_results(const std::string& csv_path, const OpDesc& desc,
+                       const BenchResult& result, bool write_header) {
+    std::ofstream csv_file;
+    csv_file.open(csv_path, write_header ? std::ios::out : std::ios::app);
+
+    if (!csv_file.is_open()) {
+        fprintf(stderr, "warning: failed to open CSV file '%s'\n", csv_path.c_str());
+        return;
+    }
+
+    // Write header if this is the first entry
+    if (write_header) {
+        csv_file << "Backend,M,N,K,Iterations,Data_type,Threads,"
+                 << "Avg_total_ms,GFLOPS,"
+                 << "Avg_ctx_init_ms,Avg_op_setup_ms,Avg_exec_ms,"
+                 << "Exec_min_ms,Exec_max_ms\n";
+    }
+
+    // Calculate metrics - amortize one-time costs for fair comparison
+    double flops = 2.0 * desc.m * desc.n * desc.k;
+    double gflops = flops / (result.avg_ms * 1e-3) / 1e9;
+
+    double avg_ctx_per_iter = result.ctx_creation_ms / desc.repeats;
+    double avg_setup_per_iter = result.op_creation_ms / desc.repeats;
+    double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + result.avg_ms;
+
+    // Write data row
+    csv_file << desc.backend << ","
+             << desc.m << "," << desc.n << "," << desc.k << ","
+             << desc.repeats << ","
+             << dtype_to_string(desc.dtype) << ","
+             << desc.threads << ","
+             << avg_total_per_iter << ","
+             << gflops << ","
+             << avg_ctx_per_iter << ","
+             << avg_setup_per_iter << ","
+             << result.avg_ms << ","
+             << result.min_ms << "," << result.max_ms << "\n";
+
+    csv_file.close();
 }

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -196,6 +197,14 @@ int main(int argc, char** argv) {
             fprintf(stderr, "error: --config <file> is required when --op layer\n");
             return 1;
         }
+
+        // Generate timestamped CSV filename for layer benchmark (disabled for now)
+        // char timestamp[32];
+        // time_t now = time(nullptr);
+        // struct tm* tm_info = localtime(&now);
+        // strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
+        // std::string csv_filename = "layer_timings_" + std::string(timestamp) + ".csv";
+
         LayerConfig cfg = parse_layer_config(config_file);
         LayerBenchResult result;
 
@@ -214,6 +223,12 @@ int main(int argc, char** argv) {
 
         print_layer_results(cfg, result, base.backend, base.dtype, base.threads,
                             base.warmup, base.repeats);
+
+        // Write to CSV (disabled for now)
+        // write_layer_csv_results(csv_filename, cfg, result, base.backend, base.dtype,
+        //                        base.threads, base.warmup, base.repeats, true);
+        // printf("Results saved to: %s\n", csv_filename.c_str());
+
         return 0;
     }
 
@@ -236,9 +251,17 @@ int main(int argc, char** argv) {
         shapes.push_back({base.m, base.n, base.k});
     }
 
+    // Generate timestamped CSV filename (disabled for now)
+    // char timestamp[32];
+    // time_t now = time(nullptr);
+    // struct tm* tm_info = localtime(&now);
+    // strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_info);
+    // std::string csv_filename = "timings_" + std::string(timestamp) + ".csv";
+    // printf("Results will be saved to: %s\n\n", csv_filename.c_str());
+
     // Run each shape
     for (size_t i = 0; i < shapes.size(); i++) {
-        if (i > 0) printf("\n---\n\n");
+        if (i > 0) printf("\n");
 
         OpDesc desc = base;
         desc.m = shapes[i].m;
@@ -247,7 +270,11 @@ int main(int argc, char** argv) {
 
         BenchResult result = run_benchmark(desc);
         print_results(desc, result);
+
+        // Write to CSV (write header only for first entry)
+        // write_csv_results(csv_filename, desc, result, i == 0);
     }
 
+    // printf("\nResults saved to: %s\n", csv_filename.c_str());
     return 0;
 }

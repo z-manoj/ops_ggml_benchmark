@@ -77,6 +77,9 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
 
     zendnnl::common::data_type_t dt = ggml_type_to_zendnn(ggml_dt);
 
+    // Track timing breakdowns
+    auto t_ctx_start = std::chrono::steady_clock::now();
+
     // 1. Allocate memory for matrices
     // To match GGML: A:[N,K] (weights), B:[K,M] (input), C:[N,M] (output)
     size_t a_size = N * K;
@@ -98,8 +101,11 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     a_data.resize(a_size * elem_size);
     b_data.resize(b_size * elem_size);
     c_data.resize(c_size * elem_size);
+    auto t_ctx_end = std::chrono::steady_clock::now();
+    double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
 
     // 2. Fill inputs with deterministic data
+    auto t_op_start = std::chrono::steady_clock::now();
     void* a_ptr = a_data.data();
     void* b_ptr = b_data.data();
     void* c_ptr = c_data.data();
@@ -127,6 +133,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     matmul_batch_params_t batch_params;
     batch_params.Batch_A = 1;
     batch_params.Batch_B = 1;
+    auto t_op_end = std::chrono::steady_clock::now();
+    double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
     // 4. Warmup
     for (int i = 0; i < desc.warmup; i++) {
@@ -200,5 +208,15 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     double flops = 2.0 * M * N * K;
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
-    return BenchResult{min_ms, avg_ms, max_ms, tflops};
+    BenchResult result;
+    result.min_ms = min_ms;
+    result.avg_ms = avg_ms;
+    result.max_ms = max_ms;
+    result.tflops = tflops;
+    result.ctx_creation_ms = ctx_creation_ms;
+    result.op_creation_ms = op_creation_ms;
+    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.other_ms = 0.0;
+
+    return result;
 }

@@ -18,8 +18,9 @@ This tool is designed for **developers**, **researchers**, and **performance eng
 - Executes operations through either:
   - GGML's CPU backend (llama.cpp) with quantization support
   - ZenDNN/oneDNN matmul primitives (AMD optimized)
-- Measures per-iteration latency (min / avg / max)
-- Produces stable, machine-parsable output
+- Measures per-iteration latency (min / avg / max) with detailed timing breakdowns
+- Produces **ZenDNN benchdnn-style output**: tabular console display + timestamped CSV files
+- Reports GFLOPS, timing breakdowns (context creation, operator setup, execution) with percentages
 - Supports warmup iterations to eliminate cold-start effects
 
 **This project does NOT:**
@@ -194,8 +195,14 @@ done
 
 ```bash
 # Expert-routed matmul (MoE) - GGML backend only
+# Default: 1 expert (simplest case, closest to regular matmul)
 ./build/ops_ggml_benchmark --backend ggml --op matmul_id \
     --m 2048 --n 64 --k 2048 --dtype q4_0 --threads 16
+
+# For realistic MoE testing: 8 experts, 2 active per token
+./build/ops_ggml_benchmark --backend ggml --op matmul_id \
+    --m 2048 --n 64 --k 2048 --dtype q4_0 --threads 16 \
+    --n_experts 8 --n_experts_used 2
 ```
 
 ### Layer-level benchmarks
@@ -270,63 +277,117 @@ mul_mat_id  ffn_down_exp  512  4096   14336  8  2
 - `mul_mat <label> <M> <N> <K>` -- dense matmul
 - `mul_mat_id <label> <M> <N> <K> <n_experts> <n_experts_used>` -- MoE expert-routed matmul
 
-### Layer output format
+### Layer Benchmark Output
 
 Shows per-operation timing and aggregate statistics:
 
+```bash
+./build/ops_ggml_benchmark --backend ggml --op layer --config configs/llama-3.1-8b.cfg \
+  --dtype f32 --threads 8 --repeats 5 --warmup 2
 ```
-[GGML] estimated weight memory: 0.11 GB
-op: layer
-backend: ggml
-model: llama-3.1-8b
-dtype: q4_0
-threads: 16
-warmup: 3
-repeats: 5
 
-graph nodes: 7
-  [0] mul_mat      attn_q           m=512   n=4096  k=4096   time(ms): min=... avg=... max=...
-  [1] mul_mat      attn_k           m=512   n=1024  k=4096   time(ms): min=... avg=... max=...
-  [2] mul_mat      attn_v           m=512   n=1024  k=4096   time(ms): min=... avg=... max=...
-  [3] mul_mat      attn_output      m=512   n=4096  k=4096   time(ms): min=... avg=... max=...
-  [4] mul_mat      ffn_gate         m=512   n=14336 k=4096   time(ms): min=... avg=... max=...
-  [5] mul_mat      ffn_up           m=512   n=14336 k=4096   time(ms): min=... avg=... max=...
-  [6] mul_mat      ffn_down         m=512   n=4096  k=14336  time(ms): min=... avg=... max=...
+```
+[GGML] estimated weight memory: 0.81 GB
 
-total time(ms): min=... avg=... max=...
+=== Layer Benchmark: llama-3.1-8b ===
+Backend  Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     5      f32        8        493.59         0.24              112.86            380.48        223.34
+
+--- Per-Operation Details (7 ops) ---
+Idx  Op_type  Label         M    N      K      GFLOPS  Min(ms)  Avg(ms)  Max(ms)
+0    mul_mat  attn_q        512  4096   4096   17.18   28.81    29.27    29.69
+1    mul_mat  attn_k        512  1024   4096   4.29    7.20     7.32     7.42
+2    mul_mat  attn_v        512  1024   4096   4.29    7.20     7.32     7.42
+3    mul_mat  attn_output   512  4096   4096   17.18   28.81    29.27    29.69
+4    mul_mat  ffn_gate      512  14336  4096   60.13   100.82   102.44   103.91
+5    mul_mat  ffn_up        512  14336  4096   60.13   100.82   102.44   103.91
+6    mul_mat  ffn_down      512  4096   14336  60.13   100.82   102.44   103.91
 ```
 
 **Note:**
 - **GGML backend**: Executes entire graph in one call, per-operation times are estimated proportionally based on FLOPs
 - **ZenDNN backend**: Executes and times each operation individually
 
-## Example output
+## Output Format
 
-### GGML backend with q4_0 quantization:
+The benchmark produces **ZenDNN benchdnn-inspired output** with tabular console display showing per-iteration average times for fair comparison.
+
+### Console Output
+
+Results are displayed in a tabular format with per-iteration averages:
+
 ```
-op: matmul
-backend: ggml
-dtype: q4_0
-shape: m=4096 n=4096 k=4096
-threads: 32
-warmup: 10
-repeats: 100
-
-time(ms): min=... avg=... max=...
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     2048   2048   2048   100    f32        96       3.10           0.01              0.22              2.87          5993.75
 ```
 
-### ZenDNN backend:
-```
-op: matmul
-backend: zendnn
-dtype: bf16
-shape: m=4096 n=4096 k=4096
-threads: 32
-warmup: 10
-repeats: 100
+**Columns explained:**
+- **Backend**: ggml or zendnn
+- **M, N, K**: Matrix dimensions
+- **Iters**: Number of timed iterations
+- **Data_type**: f32, f16, bf16, q8_0, or q4_0
+- **Threads**: Thread count
+- **Avg_total(ms)**: Average total time per iteration (includes amortized setup)
+- **Avg_ctx_init(ms)**: Context/backend initialization time (amortized per iteration)
+- **Avg_op_setup(ms)**: Graph building + memory allocation time (amortized per iteration)
+- **Avg_exec(ms)**: Pure matmul execution time per iteration (the key metric!)
+- **GFLOPS**: Performance = (2*M*N*K) / (avg_exec_ms * 1e-3) / 1e9
 
-time(ms): min=... avg=... max=...
+### Why Per-Iteration Averages?
+
+One-time setup costs (context creation, graph building) are amortized across all iterations. This makes comparisons **fair** regardless of iteration count:
+
+- 5 iterations: Setup overhead appears large
+- 100 iterations: Setup overhead is negligible
+- **Per-iteration average**: Directly comparable!
+
+Example: Both show ~2.87ms execution time:
 ```
+5 iters:   Avg_exec=2.85ms
+100 iters: Avg_exec=2.87ms
+```
+
+### Example Outputs
+
+#### Data Type Comparison (GGML backend, 2048x2048x2048, 96 threads):
+```bash
+for dtype in f32 bf16 q8_0 q4_0; do
+  ./build/ops_ggml_benchmark --dtype $dtype --m 2048 --n 2048 --k 2048 --threads 96 --repeats 100 --warmup 50
+done
+```
+
+```
+=== f32 ===
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     2048   2048   2048   100    f32        96       3.10           0.01              0.22              2.87          5993.75
+
+=== bf16 ===
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     2048   2048   2048   100    bf16       96       3.43           0.01              0.32              3.10          5544.13
+
+=== q8_0 ===
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     2048   2048   2048   100    q8_0       96       3.15           0.01              0.47              2.66          6454.16
+
+=== q4_0 ===
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     2048   2048   2048   100    q4_0       96       3.16           0.17              0.33              2.65          6486.80
+```
+
+**Analysis**: q4_0 achieves highest GFLOPS (6486.80) with 2.65ms execution time, 8% faster than q8_0.
+
+#### Backend Comparison (4096x4096x4096, bf16, 16 threads):
+```
+=== GGML bf16 ===
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+ggml     4096   4096   4096   50     bf16       16       62.73          0.02              1.87              60.84         2259.14
+
+=== ZenDNN bf16 ===
+Backend  M      N      K      Iters  Data_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
+zendnn   4096   4096   4096   50     bf16       16       41.21          0.74              1.28              39.19         3507.00
+```
+
+**Analysis**: ZenDNN is 1.55× faster than GGML (39.19ms vs 60.84ms execution time).
 
 ## Backends
 

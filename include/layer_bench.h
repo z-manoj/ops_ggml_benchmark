@@ -28,6 +28,12 @@ struct LayerBenchResult {
     double avg_ms       = 0.0;
     double max_ms       = 0.0;
     double tflops       = 0.0;
+
+    // Timing breakdowns (ZenDNN benchdnn format)
+    double ctx_creation_ms = 0.0;
+    double op_creation_ms  = 0.0;
+    double op_execution_ms = 0.0;
+    double other_ms        = 0.0;
 };
 
 // Run the layer benchmark described by |cfg| using GGML backend.
@@ -49,3 +55,9 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
 void print_layer_results(const LayerConfig& cfg, const LayerBenchResult& result,
                          const std::string& backend, ggml_type dtype,
                          int threads, int warmup, int repeats);
+
+// Write layer results to CSV file.
+void write_layer_csv_results(const std::string& csv_path, const LayerConfig& cfg,
+                             const LayerBenchResult& result, const std::string& backend,
+                             ggml_type dtype, int threads, int warmup, int repeats,
+                             bool write_header);

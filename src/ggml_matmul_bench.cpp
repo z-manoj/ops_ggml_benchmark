@@ -30,7 +30,11 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     const int64_t K = desc.k;
     const ggml_type dtype = desc.dtype;
 
+    // Track timing breakdowns
+    auto t_start = std::chrono::steady_clock::now();
+
     // 1. Init CPU backend
+    auto t_ctx_start = std::chrono::steady_clock::now();
     ggml_backend_t backend = ggml_backend_cpu_init();
     if (!backend) {
         fprintf(stderr, "error: failed to init CPU backend\n");
@@ -50,9 +54,12 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
         fprintf(stderr, "error: failed to init ggml context\n");
         exit(1);
     }
+    auto t_ctx_end = std::chrono::steady_clock::now();
+    double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
 
     // 3. Create tensors
     //    A: weight [K, M], B: input [K, N]
+    auto t_op_start = std::chrono::steady_clock::now();
     struct ggml_tensor* a = ggml_new_tensor_2d(ctx, dtype, K, M);
     struct ggml_tensor* b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, N);
     ggml_set_name(a, "A");
@@ -103,6 +110,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
     fill_tensor_deterministic(a, 42, using_repack);
     fill_tensor_deterministic(b, 137, false);  // b is always F32, no repack needed
+    auto t_op_end = std::chrono::steady_clock::now();
+    double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
     // 7. Warmup
     for (int i = 0; i < desc.warmup; i++) {
@@ -136,7 +145,17 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     ggml_free(ctx);
     ggml_backend_free(backend);
 
-    return BenchResult{min_ms, avg_ms, max_ms, tflops};
+    BenchResult result;
+    result.min_ms = min_ms;
+    result.avg_ms = avg_ms;
+    result.max_ms = max_ms;
+    result.tflops = tflops;
+    result.ctx_creation_ms = ctx_creation_ms;
+    result.op_creation_ms = op_creation_ms;
+    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.other_ms = 0.0;
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +177,8 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     const int64_t n_used = desc.n_experts_used;
     const ggml_type dtype = desc.dtype;
 
+    // Track timing breakdowns
+    auto t_ctx_start = std::chrono::steady_clock::now();
     ggml_backend_t backend = ggml_backend_cpu_init();
     if (!backend) {
         fprintf(stderr, "error: failed to init CPU backend\n");
@@ -176,7 +197,11 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
         fprintf(stderr, "error: failed to init ggml context\n");
         exit(1);
     }
+    auto t_ctx_end = std::chrono::steady_clock::now();
+    double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
 
+    // Operator creation timing
+    auto t_op_start = std::chrono::steady_clock::now();
     // Expert weight matrices stacked: [K, M, n_experts]
     struct ggml_tensor* as = ggml_new_tensor_3d(ctx, dtype, K, M, n_exp);
     ggml_set_name(as, "experts");
@@ -244,6 +269,8 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
             }
         }
     }
+    auto t_op_end = std::chrono::steady_clock::now();
+    double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
     // Warmup
     for (int i = 0; i < desc.warmup; i++) {
@@ -274,5 +301,15 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     ggml_free(ctx);
     ggml_backend_free(backend);
 
-    return BenchResult{min_ms, avg_ms, max_ms, tflops};
+    BenchResult result;
+    result.min_ms = min_ms;
+    result.avg_ms = avg_ms;
+    result.max_ms = max_ms;
+    result.tflops = tflops;
+    result.ctx_creation_ms = ctx_creation_ms;
+    result.op_creation_ms = op_creation_ms;
+    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.other_ms = 0.0;
+
+    return result;
 }

@@ -73,6 +73,9 @@ static size_t estimate_weight_bytes_zendnn(const LayerConfig& cfg, ggml_type dty
 LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
                                     ggml_type dtype, int threads,
                                     int warmup, int repeats) {
+    // Track timing breakdowns
+    auto t_ctx_start = std::chrono::steady_clock::now();
+
     // Validate: no mul_mat_id ops allowed
     for (const auto& op : cfg.ops) {
         if (op.op_type != "mul_mat") {
@@ -100,7 +103,12 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
         exit(1);
     }
 
+    auto t_ctx_end = std::chrono::steady_clock::now();
+    double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
+
     // Allocate memory for all operations
+    auto t_op_start = std::chrono::steady_clock::now();
+
     struct OpData {
         std::vector<char> a_data;  // weights [N, K]
         std::vector<char> b_data;  // input [M, K]
@@ -175,6 +183,9 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
     matmul_batch_params_t batch_params;
     batch_params.Batch_A = 1;
     batch_params.Batch_B = 1;
+
+    auto t_op_end = std::chrono::steady_clock::now();
+    double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
     // Warmup: execute all ops sequentially
     for (int w = 0; w < warmup; w++) {
@@ -271,6 +282,12 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
     result.avg_ms = total_avg_ms;
     result.max_ms = total_max_ms;
     result.tflops = (result.total_gflops * 1e9) / (total_avg_ms * 1e-3) / 1e12;
+
+    // Set timing breakdowns (all per-iteration averages)
+    result.ctx_creation_ms = ctx_creation_ms;
+    result.op_creation_ms = op_creation_ms;
+    result.op_execution_ms = total_avg_ms;  // Per-iteration average
+    result.other_ms = 0.0;
 
     return result;
 }
