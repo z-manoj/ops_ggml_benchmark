@@ -104,6 +104,8 @@ static void print_usage(const char* prog) {
         "  --threads <int>           Thread count (default: hw concurrency)\n"
         "  --repeats <int>           Timed iterations (default: 100)\n"
         "  --warmup <int>            Warmup iterations (default: 10)\n"
+        "  --n_experts <int>         Total expert count for matmul_id (default: 1)\n"
+        "  --n_experts_used <int>    Active experts per token for matmul_id (default: 1)\n"
         "  --help                    Show this message\n",
         prog);
 }
@@ -153,6 +155,8 @@ int main(int argc, char** argv) {
         else if (arg("--threads")) { base.threads = atoi(next()); }
         else if (arg("--repeats")) { base.repeats = atoi(next()); }
         else if (arg("--warmup"))  { base.warmup  = atoi(next()); }
+        else if (arg("--n_experts")) { base.n_experts = atoi(next()); }
+        else if (arg("--n_experts_used")) { base.n_experts_used = atoi(next()); }
         else if (arg("--help") || arg("-h")) {
             print_usage(argv[0]);
             return 0;

@@ -18,6 +18,6 @@ struct OpDesc {
     int         warmup  = 10;
 
     // matmul_id specific
-    int         n_experts    = 8;   // total expert count
-    int         n_experts_used = 2; // experts selected per token
+    int         n_experts    = 1;   // total expert count (default: 1 for simplicity)
+    int         n_experts_used = 1; // experts selected per token (default: 1)
 };
