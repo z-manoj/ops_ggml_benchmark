@@ -25,4 +25,12 @@ set(GGML_HIP    OFF CACHE BOOL "" FORCE)
 # Enable native CPU optimizations
 set(GGML_NATIVE ON CACHE BOOL "" FORCE)
 
+# Explicitly enable AVX-512 with bf16 support for AMD EPYC Genoa / Intel Sapphire Rapids
+# GGML_NATIVE should auto-detect these, but we force them on to ensure optimal performance
+set(GGML_AVX ON CACHE BOOL "" FORCE)
+set(GGML_AVX2 ON CACHE BOOL "" FORCE)
+set(GGML_AVX512 ON CACHE BOOL "" FORCE)
+set(GGML_AVX512_BF16 ON CACHE BOOL "" FORCE)
+set(GGML_AVX512_VNNI ON CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(llama_cpp)
