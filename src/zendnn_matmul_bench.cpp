@@ -73,9 +73,12 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     const int64_t M = desc.m;
     const int64_t N = desc.n;
     const int64_t K = desc.k;
-    const ggml_type ggml_dt = desc.dtype;
+    const ggml_type src_ggml = desc.src_dtype;  // f32 or bf16
+    const ggml_type wei_ggml = desc.wei_dtype;  // f32 or bf16
 
-    zendnnl::common::data_type_t dt = ggml_type_to_zendnn(ggml_dt);
+    zendnnl::common::data_type_t src_dt = ggml_type_to_zendnn(src_ggml);
+    zendnnl::common::data_type_t wei_dt = ggml_type_to_zendnn(wei_ggml);
+    zendnnl::common::data_type_t dst_dt = zendnnl::common::data_type_t::f32;  // Output always f32
 
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
@@ -88,19 +91,13 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
 
     std::vector<char> a_data, b_data, c_data;
 
-    size_t elem_size;
-    if (dt == zendnnl::common::data_type_t::f32) {
-        elem_size = sizeof(float);
-    } else if (dt == zendnnl::common::data_type_t::bf16) {
-        elem_size = sizeof(uint16_t);
-    } else {
-        fprintf(stderr, "error: unsupported data type\n");
-        exit(1);
-    }
+    size_t wei_elem_size = (wei_dt == zendnnl::common::data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+    size_t src_elem_size = (src_dt == zendnnl::common::data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+    size_t dst_elem_size = sizeof(float);  // Output always f32
 
-    a_data.resize(a_size * elem_size);
-    b_data.resize(b_size * elem_size);
-    c_data.resize(c_size * elem_size);
+    a_data.resize(a_size * wei_elem_size);  // weights
+    b_data.resize(b_size * src_elem_size);  // source/input
+    c_data.resize(c_size * dst_elem_size);  // output
     auto t_ctx_end = std::chrono::steady_clock::now();
     double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
 
@@ -110,21 +107,27 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     void* b_ptr = b_data.data();
     void* c_ptr = c_data.data();
 
-    if (dt == zendnnl::common::data_type_t::f32) {
+    // Fill weights (a)
+    if (wei_dt == zendnnl::common::data_type_t::f32) {
         fill_buffer(reinterpret_cast<float*>(a_ptr), a_size, 42);
-        fill_buffer(reinterpret_cast<float*>(b_ptr), b_size, 137);
-    } else if (dt == zendnnl::common::data_type_t::bf16) {
+    } else if (wei_dt == zendnnl::common::data_type_t::bf16) {
         fill_buffer_bf16(a_ptr, a_size, 42);
+    }
+
+    // Fill source/input (b)
+    if (src_dt == zendnnl::common::data_type_t::f32) {
+        fill_buffer(reinterpret_cast<float*>(b_ptr), b_size, 137);
+    } else if (src_dt == zendnnl::common::data_type_t::bf16) {
         fill_buffer_bf16(b_ptr, b_size, 137);
     }
 
     // 3. Setup ZenDNN matmul parameters
     matmul_data_types dtypes;
-    dtypes.src = dt;
-    dtypes.wei = dt;
-    dtypes.dst = dt;
+    dtypes.src = src_dt;
+    dtypes.wei = wei_dt;
+    dtypes.dst = dst_dt;  // Always f32
     dtypes.bias = zendnnl::common::data_type_t::none;
-    dtypes.compute = dt;
+    dtypes.compute = zendnnl::common::data_type_t::f32;  // Compute in f32
 
     matmul_params params;
     params.dtypes = dtypes;

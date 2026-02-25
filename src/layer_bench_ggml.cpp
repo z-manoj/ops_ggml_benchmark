@@ -72,8 +72,9 @@ static void fill_routing_ids(struct ggml_tensor* ids, int n_experts,
 }
 
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
-                                  ggml_type dtype, int threads,
-                                  int warmup, int repeats) {
+                                  ggml_type wei_dtype, int threads,
+                                  int warmup, int repeats,
+                                  ggml_type src_dtype) {
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
 
@@ -92,7 +93,7 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
     }
 
     // Print estimated memory
-    size_t weight_bytes = estimate_weight_bytes_ggml(cfg, dtype);
+    size_t weight_bytes = estimate_weight_bytes_ggml(cfg, wei_dtype);
     fprintf(stderr, "[GGML] estimated weight memory: %.2f GB\n",
             weight_bytes / (1024.0 * 1024.0 * 1024.0));
 
@@ -136,8 +137,8 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
         double flops;
 
         if (op.op_type == "mul_mat") {
-            struct ggml_tensor* a = ggml_new_tensor_2d(ctx, dtype, K, N);
-            struct ggml_tensor* b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, M);
+            struct ggml_tensor* a = ggml_new_tensor_2d(ctx, wei_dtype, K, N);
+            struct ggml_tensor* b = ggml_new_tensor_2d(ctx, src_dtype, K, M);
 
             char name_a[64], name_b[64], name_c[64];
             snprintf(name_a, sizeof(name_a), "%s_A", op.label.c_str());
@@ -161,8 +162,8 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
             const int64_t n_exp  = op.n_experts;
             const int64_t n_used = op.n_experts_used;
 
-            struct ggml_tensor* as  = ggml_new_tensor_3d(ctx, dtype, K, N, n_exp);
-            struct ggml_tensor* b   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, K, n_used, M);
+            struct ggml_tensor* as  = ggml_new_tensor_3d(ctx, wei_dtype, K, N, n_exp);
+            struct ggml_tensor* b   = ggml_new_tensor_3d(ctx, src_dtype, K, n_used, M);
             struct ggml_tensor* ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, M);
 
             char name_as[64], name_b[64], name_ids[64], name_c[64];
@@ -203,7 +204,7 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (dtype == GGML_TYPE_Q4_0) {
+    if (wei_dtype == GGML_TYPE_Q4_0) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -231,13 +232,16 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
 
     // Fill tensors
     // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
+    fprintf(stderr, "[DEBUG] Filling %zu tensors...\n", fill_list.size());
     for (const auto& fi : fill_list) {
         if (fi.is_routing_ids) {
             fill_routing_ids(fi.tensor, fi.n_experts, fi.n_experts_used,
                              fi.n_tokens, fi.seed);
         } else {
-            // Use backend_set for weight tensors (type matches dtype) when using repack
-            bool is_weight = (fi.tensor->type == dtype);
+            // Use backend_set for weight tensors (type matches wei_dtype) when using repack
+            bool is_weight = (fi.tensor->type == wei_dtype);
+            fprintf(stderr, "[DEBUG]   Tensor type=%d, is_weight=%d, size=%.2f MB\n",
+                    fi.tensor->type, is_weight, ggml_nbytes(fi.tensor) / (1024.0*1024.0));
             fill_tensor_deterministic(fi.tensor, fi.seed, using_repack && is_weight);
         }
     }

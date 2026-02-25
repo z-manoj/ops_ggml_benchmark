@@ -98,9 +98,13 @@ static void print_usage(const char* prog) {
         "                            e.g. 4096x4096x4096,1024x1024x1024\n"
         "  --batch <file>            Read shapes from file (one per line)\n"
         "                            Lines: \"M N K\" or \"MxNxK\", # for comments\n"
+        "  --src_dtype <f32|bf16>\n"
+        "                            Source/input data type (default: f32)\n"
+        "  --wei_dtype <f32|f16|bf16|q8_0|q4_0>\n"
+        "                            Weight data type (default: f32)\n"
+        "                            q8_0/q4_0: quantized weights (ggml only)\n"
         "  --dtype <f32|f16|bf16|q8_0|q4_0>\n"
-        "                            Data type (default: f32)\n"
-        "                            q8_0/q4_0: quantized weights, f32 src (ggml only)\n"
+        "                            Set both src and wei dtypes (deprecated)\n"
         "  --backend <ggml|zendnn>   Backend to use (default: ggml)\n"
         "  --threads <int>           Thread count (default: hw concurrency)\n"
         "  --repeats <int>           Timed iterations (default: 100)\n"
@@ -145,13 +149,32 @@ int main(int argc, char** argv) {
         else if (arg("--k"))  { base.k = atoi(next()); }
         else if (arg("--shapes"))  { shapes_arg = next(); }
         else if (arg("--batch"))   { batch_file = next(); }
-        else if (arg("--dtype")) {
+        else if (arg("--src_dtype")) {
             std::string s = next();
-            base.dtype = parse_dtype(s);
-            if (base.dtype == GGML_TYPE_COUNT) {
+            base.src_dtype = parse_dtype(s);
+            if (base.src_dtype == GGML_TYPE_COUNT) {
+                fprintf(stderr, "error: unknown src_dtype '%s'\n", s.c_str());
+                return 1;
+            }
+        }
+        else if (arg("--wei_dtype")) {
+            std::string s = next();
+            base.wei_dtype = parse_dtype(s);
+            if (base.wei_dtype == GGML_TYPE_COUNT) {
+                fprintf(stderr, "error: unknown wei_dtype '%s'\n", s.c_str());
+                return 1;
+            }
+        }
+        else if (arg("--dtype")) {
+            // Backward compatibility: set both src and wei dtypes to the same value
+            std::string s = next();
+            ggml_type dt = parse_dtype(s);
+            if (dt == GGML_TYPE_COUNT) {
                 fprintf(stderr, "error: unknown dtype '%s'\n", s.c_str());
                 return 1;
             }
+            base.src_dtype = dt;
+            base.wei_dtype = dt;
         }
         else if (arg("--threads")) { base.threads = atoi(next()); }
         else if (arg("--repeats")) { base.repeats = atoi(next()); }
@@ -179,16 +202,56 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Validate dtype for ZenDNN backend
-    if (base.backend == "zendnn" && base.dtype == GGML_TYPE_F16) {
-        fprintf(stderr, "error: ZenDNN backend does not support f16 (only f32 and bf16 supported)\n");
+    // Validate src_dtype (only f32 and bf16 supported)
+    if (base.src_dtype != GGML_TYPE_F32 && base.src_dtype != GGML_TYPE_BF16) {
+        fprintf(stderr, "error: src_dtype must be f32 or bf16\n");
         return 1;
     }
 
-    // Validate quantized dtypes (only supported on GGML backend)
-    if ((base.dtype == GGML_TYPE_Q8_0 || base.dtype == GGML_TYPE_Q4_0) && base.backend != "ggml") {
+    // Validate dtypes for ZenDNN backend
+    if (base.backend == "zendnn") {
+        if (base.wei_dtype == GGML_TYPE_F16) {
+            fprintf(stderr, "error: ZenDNN backend does not support f16 weights (only f32 and bf16 supported)\n");
+            return 1;
+        }
+    }
+
+    // Validate quantized dtypes (only supported on GGML backend for weights)
+    if ((base.wei_dtype == GGML_TYPE_Q8_0 || base.wei_dtype == GGML_TYPE_Q4_0) && base.backend != "ggml") {
         fprintf(stderr, "error: quantized dtypes (q8_0, q4_0) are only supported on ggml backend\n");
         return 1;
+    }
+
+    // Validate that quantized types are only used for weights
+    if (base.src_dtype == GGML_TYPE_Q8_0 || base.src_dtype == GGML_TYPE_Q4_0 ||
+        base.src_dtype == GGML_TYPE_F16) {
+        fprintf(stderr, "error: src_dtype can only be f32 or bf16 (not f16, q8_0, or q4_0)\n");
+        return 1;
+    }
+
+    // GGML backend: For mixed data types, src must be F32
+    if (base.backend == "ggml") {
+        if (base.src_dtype != base.wei_dtype) {
+            // Mixed data types - src must be F32
+            if (base.src_dtype != GGML_TYPE_F32) {
+                fprintf(stderr, "error: GGML backend with mixed data types requires src_dtype=f32\n");
+                fprintf(stderr, "       Current: src=%s, wei=%s\n",
+                        dtype_to_string(base.src_dtype), dtype_to_string(base.wei_dtype));
+                fprintf(stderr, "       Supported combinations:\n");
+                fprintf(stderr, "         - Same type: src=f32 wei=f32, OR src=bf16 wei=bf16\n");
+                fprintf(stderr, "         - Mixed type: src=f32 wei=f16/bf16/q8_0/q4_0\n");
+                return 1;
+            }
+        }
+    }
+
+    // GGML type compatibility: quantized weights require F32 input
+    if (base.backend == "ggml") {
+        if ((base.wei_dtype == GGML_TYPE_Q8_0 || base.wei_dtype == GGML_TYPE_Q4_0) &&
+            base.src_dtype != GGML_TYPE_F32) {
+            fprintf(stderr, "error: quantized weights (q8_0, q4_0) require f32 input for GGML backend\n");
+            return 1;
+        }
     }
 
     // --- Layer benchmark mode ---
@@ -196,6 +259,19 @@ int main(int argc, char** argv) {
         if (config_file.empty()) {
             fprintf(stderr, "error: --config <file> is required when --op layer\n");
             return 1;
+        }
+
+        // Type compatibility validation for layer mode
+        if (base.backend == "ggml") {
+            if (base.src_dtype != base.wei_dtype) {
+                // Mixed data types - src must be F32
+                if (base.src_dtype != GGML_TYPE_F32) {
+                    fprintf(stderr, "error: GGML backend with mixed data types requires src_dtype=f32 for layer mode\n");
+                    fprintf(stderr, "       Current: src=%s, wei=%s\n",
+                            dtype_to_string(base.src_dtype), dtype_to_string(base.wei_dtype));
+                    return 1;
+                }
+            }
         }
 
         // Generate timestamped CSV filename for layer benchmark (disabled for now)
@@ -210,18 +286,18 @@ int main(int argc, char** argv) {
 
         if (base.backend == "zendnn") {
 #ifdef ENABLE_ZENDNN
-            result = bench_layer_zendnn(cfg, base.dtype, base.threads,
-                                       base.warmup, base.repeats);
+            result = bench_layer_zendnn(cfg, base.wei_dtype, base.threads,
+                                       base.warmup, base.repeats, base.src_dtype);
 #else
             fprintf(stderr, "error: ZenDNN backend not enabled. Rebuild with -DENABLE_ZENDNN=ON\n");
             return 1;
 #endif
         } else {
-            result = bench_layer_ggml(cfg, base.dtype, base.threads,
-                                     base.warmup, base.repeats);
+            result = bench_layer_ggml(cfg, base.wei_dtype, base.threads,
+                                     base.warmup, base.repeats, base.src_dtype);
         }
 
-        print_layer_results(cfg, result, base.backend, base.dtype, base.threads,
+        print_layer_results(cfg, result, base.backend, base.wei_dtype, base.threads,
                             base.warmup, base.repeats);
 
         // Write to CSV (disabled for now)

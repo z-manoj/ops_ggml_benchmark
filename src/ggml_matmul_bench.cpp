@@ -28,7 +28,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     const int64_t M = desc.m;
     const int64_t N = desc.n;
     const int64_t K = desc.k;
-    const ggml_type dtype = desc.dtype;
+    const ggml_type src_dtype = desc.src_dtype;  // f32 or bf16
+    const ggml_type wei_dtype = desc.wei_dtype;  // f32, f16, bf16, q8_0, q4_0
 
     // Track timing breakdowns
     auto t_start = std::chrono::steady_clock::now();
@@ -60,14 +61,14 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     // 3. Create tensors
     //    A: weight [K, M], B: input [K, N]
     auto t_op_start = std::chrono::steady_clock::now();
-    struct ggml_tensor* a = ggml_new_tensor_2d(ctx, dtype, K, M);
-    struct ggml_tensor* b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, N);
+    struct ggml_tensor* a = ggml_new_tensor_2d(ctx, wei_dtype, K, M);
+    struct ggml_tensor* b = ggml_new_tensor_2d(ctx, src_dtype, K, N);
     ggml_set_name(a, "A");
     ggml_set_name(b, "B");
     ggml_set_input(a);
     ggml_set_input(b);
 
-    // 4. Build graph: single mul_mat node
+    // 4. Build graph: single mul_mat node (output is F32)
     struct ggml_tensor* c = ggml_mul_mat(ctx, a, b);
     ggml_set_name(c, "C");
     ggml_set_output(c);
@@ -80,7 +81,7 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (dtype == GGML_TYPE_Q4_0) {
+    if (wei_dtype == GGML_TYPE_Q4_0) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -175,7 +176,8 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     const int64_t K = desc.k;
     const int64_t n_exp = desc.n_experts;
     const int64_t n_used = desc.n_experts_used;
-    const ggml_type dtype = desc.dtype;
+    const ggml_type src_dtype = desc.src_dtype;  // f32 or bf16
+    const ggml_type wei_dtype = desc.wei_dtype;  // f32, f16, bf16, q8_0, q4_0
 
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
@@ -203,12 +205,12 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     // Operator creation timing
     auto t_op_start = std::chrono::steady_clock::now();
     // Expert weight matrices stacked: [K, M, n_experts]
-    struct ggml_tensor* as = ggml_new_tensor_3d(ctx, dtype, K, M, n_exp);
+    struct ggml_tensor* as = ggml_new_tensor_3d(ctx, wei_dtype, K, M, n_exp);
     ggml_set_name(as, "experts");
     ggml_set_input(as);
 
     // Input: [K, n_experts_used, N]  (3D -- ne[2]=N must match ids ne[1])
-    struct ggml_tensor* b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, K, n_used, N);
+    struct ggml_tensor* b = ggml_new_tensor_3d(ctx, src_dtype, K, n_used, N);
     ggml_set_name(b, "input");
     ggml_set_input(b);
 
@@ -217,7 +219,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     ggml_set_name(ids, "ids");
     ggml_set_input(ids);
 
-    // Build graph
+    // Build graph (output is F32)
     struct ggml_tensor* c = ggml_mul_mat_id(ctx, as, b, ids);
     ggml_set_name(c, "C");
     ggml_set_output(c);
@@ -229,7 +231,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (dtype == GGML_TYPE_Q4_0) {
+    if (wei_dtype == GGML_TYPE_Q4_0) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);

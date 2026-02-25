@@ -71,8 +71,9 @@ static size_t estimate_weight_bytes_zendnn(const LayerConfig& cfg, ggml_type dty
 }
 
 LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
-                                    ggml_type dtype, int threads,
-                                    int warmup, int repeats) {
+                                    ggml_type wei_dtype, int threads,
+                                    int warmup, int repeats,
+                                    ggml_type src_dtype) {
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
 
@@ -85,23 +86,19 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
         }
     }
 
-    zendnnl::common::data_type_t dt = ggml_type_to_zendnn_layer(dtype);
+    zendnnl::common::data_type_t src_dt = ggml_type_to_zendnn_layer(src_dtype);
+    zendnnl::common::data_type_t wei_dt = ggml_type_to_zendnn_layer(wei_dtype);
+    zendnnl::common::data_type_t dst_dt = zendnnl::common::data_type_t::f32;  // Output always f32
 
     // Print estimated memory
-    size_t weight_bytes = estimate_weight_bytes_zendnn(cfg, dtype);
+    size_t weight_bytes = estimate_weight_bytes_zendnn(cfg, wei_dtype);
     fprintf(stderr, "[ZenDNN] estimated weight memory: %.2f GB\n",
             weight_bytes / (1024.0 * 1024.0 * 1024.0));
 
-    // Determine element size
-    size_t elem_size;
-    if (dt == zendnnl::common::data_type_t::f32) {
-        elem_size = sizeof(float);
-    } else if (dt == zendnnl::common::data_type_t::bf16) {
-        elem_size = sizeof(uint16_t);
-    } else {
-        fprintf(stderr, "[ZenDNN] error: unsupported data type\n");
-        exit(1);
-    }
+    // Determine element sizes
+    size_t wei_elem_size = (wei_dt == zendnnl::common::data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+    size_t src_elem_size = (src_dt == zendnnl::common::data_type_t::f32) ? sizeof(float) : sizeof(uint16_t);
+    size_t dst_elem_size = sizeof(float);  // Output always f32
 
     auto t_ctx_end = std::chrono::steady_clock::now();
     double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
@@ -140,19 +137,25 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
         size_t b_size = M * K;
         size_t c_size = M * N;
 
-        op_data.a_data.resize(a_size * elem_size);
-        op_data.b_data.resize(b_size * elem_size);
-        op_data.c_data.resize(c_size * elem_size);
+        op_data.a_data.resize(a_size * wei_elem_size);  // weights
+        op_data.b_data.resize(b_size * src_elem_size);  // source/input
+        op_data.c_data.resize(c_size * dst_elem_size);  // output
 
         // Fill inputs with deterministic data
         void* a_ptr = op_data.a_data.data();
         void* b_ptr = op_data.b_data.data();
 
-        if (dt == zendnnl::common::data_type_t::f32) {
+        // Fill weights (a)
+        if (wei_dt == zendnnl::common::data_type_t::f32) {
             fill_buffer_layer(reinterpret_cast<float*>(a_ptr), a_size, seed_counter++);
-            fill_buffer_layer(reinterpret_cast<float*>(b_ptr), b_size, seed_counter++);
-        } else if (dt == zendnnl::common::data_type_t::bf16) {
+        } else if (wei_dt == zendnnl::common::data_type_t::bf16) {
             fill_buffer_bf16_layer(a_ptr, a_size, seed_counter++);
+        }
+
+        // Fill source/input (b)
+        if (src_dt == zendnnl::common::data_type_t::f32) {
+            fill_buffer_layer(reinterpret_cast<float*>(b_ptr), b_size, seed_counter++);
+        } else if (src_dt == zendnnl::common::data_type_t::bf16) {
             fill_buffer_bf16_layer(b_ptr, b_size, seed_counter++);
         }
 
@@ -170,11 +173,11 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
 
     // Setup ZenDNN matmul parameters (common for all ops)
     matmul_data_types dtypes;
-    dtypes.src = dt;
-    dtypes.wei = dt;
-    dtypes.dst = dt;
+    dtypes.src = src_dt;
+    dtypes.wei = wei_dt;
+    dtypes.dst = dst_dt;  // Always f32
     dtypes.bias = zendnnl::common::data_type_t::none;
-    dtypes.compute = dt;
+    dtypes.compute = zendnnl::common::data_type_t::f32;  // Compute in f32
 
     matmul_params params;
     params.dtypes = dtypes;

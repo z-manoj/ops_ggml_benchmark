@@ -47,8 +47,8 @@ BenchResult run_benchmark(const OpDesc& desc) {
 void print_results(const OpDesc& desc, const BenchResult& result) {
     // ZenDNN benchdnn-inspired tabular format with per-iteration averages
     // Header
-    printf("%-8s %-6s %-6s %-6s %-6s %-15s %-8s %-18s %-20s %-20s %-18s %-10s\n",
-           "Backend", "M", "N", "K", "Iters", "Data_type", "Threads",
+    printf("%-8s %-6s %-6s %-6s %-6s %-15s %-15s %-8s %-18s %-20s %-20s %-18s %-10s\n",
+           "Backend", "M", "N", "K", "Iters", "Src_type", "Wei_type", "Threads",
            "Avg_total(ms)", "Avg_ctx_init(ms)", "Avg_op_setup(ms)", "Avg_exec(ms)", "GFLOPS");
 
     // Calculate GFLOPS
@@ -61,11 +61,12 @@ void print_results(const OpDesc& desc, const BenchResult& result) {
     double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + result.avg_ms;
 
     // Data row
-    printf("%-8s %-6d %-6d %-6d %-6d %-15s %-8d %-18.2f %-20.2f %-20.2f %-18.2f %-18.2f\n",
+    printf("%-8s %-6d %-6d %-6d %-6d %-15s %-15s %-8d %-18.2f %-20.2f %-20.2f %-18.2f %-18.2f\n",
            desc.backend.c_str(),
            desc.m, desc.n, desc.k,
            desc.repeats,
-           dtype_to_string(desc.dtype),
+           dtype_to_string(desc.src_dtype),
+           dtype_to_string(desc.wei_dtype),
            desc.threads,
            avg_total_per_iter,
            avg_ctx_per_iter,
@@ -88,7 +89,7 @@ void write_csv_results(const std::string& csv_path, const OpDesc& desc,
 
     // Write header if this is the first entry
     if (write_header) {
-        csv_file << "Backend,M,N,K,Iterations,Data_type,Threads,"
+        csv_file << "Backend,M,N,K,Iterations,Src_type,Wei_type,Threads,"
                  << "Avg_total_ms,GFLOPS,"
                  << "Avg_ctx_init_ms,Avg_op_setup_ms,Avg_exec_ms,"
                  << "Exec_min_ms,Exec_max_ms\n";
@@ -106,7 +107,8 @@ void write_csv_results(const std::string& csv_path, const OpDesc& desc,
     csv_file << desc.backend << ","
              << desc.m << "," << desc.n << "," << desc.k << ","
              << desc.repeats << ","
-             << dtype_to_string(desc.dtype) << ","
+             << dtype_to_string(desc.src_dtype) << ","
+             << dtype_to_string(desc.wei_dtype) << ","
              << desc.threads << ","
              << avg_total_per_iter << ","
              << gflops << ","

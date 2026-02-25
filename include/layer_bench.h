@@ -39,16 +39,18 @@ struct LayerBenchResult {
 // Run the layer benchmark described by |cfg| using GGML backend.
 // Supports both mul_mat and mul_mat_id operations.
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
-                                  ggml_type dtype, int threads,
-                                  int warmup, int repeats);
+                                  ggml_type wei_dtype, int threads,
+                                  int warmup, int repeats,
+                                  ggml_type src_dtype = GGML_TYPE_F32);
 
 #ifdef ENABLE_ZENDNN
 // Run the layer benchmark described by |cfg| using ZenDNN backend.
 // Only supports mul_mat operations (non-MoE models).
 // Will error if config contains mul_mat_id ops.
 LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
-                                    ggml_type dtype, int threads,
-                                    int warmup, int repeats);
+                                    ggml_type wei_dtype, int threads,
+                                    int warmup, int repeats,
+                                    ggml_type src_dtype = GGML_TYPE_F32);
 #endif
 
 // Print layer benchmark results.
