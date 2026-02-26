@@ -7,16 +7,52 @@
 #include <algorithm>
 #include <omp.h>
 #include <immintrin.h>
+#include <cpuid.h>
 
 // ---------------------------------------------------------------------------
 // Cache-blocking tile sizes (tuned for AMD EPYC 9R14: 32KB L1d, 1MB L2, 384MB L3)
-// Conservative 2x increase to exploit larger L2 without overshooting
+// Kept at AVX2-tuned values: cache locality more important than matching vector width
+// AVX-512 benefit comes from wider vectors (32 floats/iter), not larger tiles
 // ---------------------------------------------------------------------------
-static constexpr int64_t N_TILE = 128;   // output rows per tile (was 64, 2x larger)
-static constexpr int64_t K_TILE = 1024;  // inner-dim elements per tile (was 512, 2x larger)
+static constexpr int64_t N_TILE = 128;   // output rows per tile
+static constexpr int64_t K_TILE = 1024;  // inner-dim elements per tile
+// Working set: 128 × 1024 × 2 bytes (f16) = 256KB (25% of 1MB L2, optimal)
 
 // ---------------------------------------------------------------------------
-// AVX2+FMA horizontal reduction helper
+// Runtime CPU detection
+// ---------------------------------------------------------------------------
+static bool cpu_has_avx512f() {
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid_max(0, nullptr) < 7) return false;
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    return (ebx & (1 << 16)) != 0;  // AVX512F bit
+}
+
+static bool cpu_has_avx512_bf16() {
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid_max(0, nullptr) < 7) return false;
+    __cpuid_count(7, 1, eax, ebx, ecx, edx);
+    return (eax & (1 << 5)) != 0;  // AVX512_BF16 bit
+}
+
+static const bool g_has_avx512 = cpu_has_avx512f();
+static const bool g_has_avx512_bf16 = cpu_has_avx512_bf16();
+
+// NOTE: BF16 native compute via _mm512_dpbf16_ps() would eliminate FP16→FP32
+// conversion overhead and reduce memory bandwidth by ~30%, but requires:
+// 1. GGML to store weights in BF16 format (currently uses FP16)
+// 2. FP16→BF16 conversion layer (or upstream GGML changes)
+// Current implementation uses AVX-512 FP32 compute with FP16 input conversion.
+
+// ---------------------------------------------------------------------------
+// AVX-512 horizontal reduction (much simpler than AVX2!)
+// ---------------------------------------------------------------------------
+static inline float hsum_avx512(__m512 v) {
+    return _mm512_reduce_add_ps(v);
+}
+
+// ---------------------------------------------------------------------------
+// AVX2 horizontal reduction helper (fallback)
 // ---------------------------------------------------------------------------
 static inline float hsum_avx2(__m256 v) {
     __m128 hi = _mm256_extractf128_ps(v, 1);
@@ -27,11 +63,151 @@ static inline float hsum_avx2(__m256 v) {
     return _mm_cvtss_f32(s);
 }
 
+// ===========================================================================
+// AVX-512 KERNELS (2x wider, processes 16 floats per vector)
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
-// Multi-row dot product: compute 4 output rows at once against the same
-// input vector. This loads the input once and reuses it across 4 weight
-// rows, cutting input memory bandwidth by 4x.
+// Multi-row dot product (AVX-512): compute 4 output rows at once
+// Processes 32 floats per iteration (2× __m512 vectors)
 // ---------------------------------------------------------------------------
+static inline void dot4_f32_avx512(
+        const float* w0, const float* w1,
+        const float* w2, const float* w3,
+        const float* inp, int64_t len,
+        float& out0, float& out1, float& out2, float& out3) {
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+
+    int64_t i = 0;
+    // Process 32 floats per iteration
+    for (; i + 31 < len; i += 32) {
+        __m512 in0 = _mm512_loadu_ps(inp + i);
+        __m512 in1 = _mm512_loadu_ps(inp + i + 16);
+
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(w0 + i),      in0, acc0);
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(w0 + i + 16), in1, acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_loadu_ps(w1 + i),      in0, acc1);
+        acc1 = _mm512_fmadd_ps(_mm512_loadu_ps(w1 + i + 16), in1, acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_loadu_ps(w2 + i),      in0, acc2);
+        acc2 = _mm512_fmadd_ps(_mm512_loadu_ps(w2 + i + 16), in1, acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_loadu_ps(w3 + i),      in0, acc3);
+        acc3 = _mm512_fmadd_ps(_mm512_loadu_ps(w3 + i + 16), in1, acc3);
+    }
+    // Process remaining 16 floats
+    for (; i + 15 < len; i += 16) {
+        __m512 in0 = _mm512_loadu_ps(inp + i);
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(w0 + i), in0, acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_loadu_ps(w1 + i), in0, acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_loadu_ps(w2 + i), in0, acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_loadu_ps(w3 + i), in0, acc3);
+    }
+
+    out0 = hsum_avx512(acc0);
+    out1 = hsum_avx512(acc1);
+    out2 = hsum_avx512(acc2);
+    out3 = hsum_avx512(acc3);
+
+    // Scalar tail
+    for (; i < len; i++) {
+        float v = inp[i];
+        out0 += w0[i] * v;
+        out1 += w1[i] * v;
+        out2 += w2[i] * v;
+        out3 += w3[i] * v;
+    }
+}
+
+static inline void dot4_f16_f32_avx512(
+        const ggml_fp16_t* w0, const ggml_fp16_t* w1,
+        const ggml_fp16_t* w2, const ggml_fp16_t* w3,
+        const float* inp, int64_t len,
+        float& out0, float& out1, float& out2, float& out3) {
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+
+    int64_t i = 0;
+    // Process 32 floats per iteration (load 32 FP16 → convert to 2× __m512)
+    for (; i + 31 < len; i += 32) {
+        __m512 in0 = _mm512_loadu_ps(inp + i);
+        __m512 in1 = _mm512_loadu_ps(inp + i + 16);
+
+        acc0 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w0+i))),    in0, acc0);
+        acc0 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w0+i+16))), in1, acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w1+i))),    in0, acc1);
+        acc1 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w1+i+16))), in1, acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w2+i))),    in0, acc2);
+        acc2 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w2+i+16))), in1, acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w3+i))),    in0, acc3);
+        acc3 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w3+i+16))), in1, acc3);
+    }
+    // Process remaining 16 floats
+    for (; i + 15 < len; i += 16) {
+        __m512 in0 = _mm512_loadu_ps(inp + i);
+        acc0 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w0+i))), in0, acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w1+i))), in0, acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w2+i))), in0, acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(w3+i))), in0, acc3);
+    }
+
+    out0 = hsum_avx512(acc0);
+    out1 = hsum_avx512(acc1);
+    out2 = hsum_avx512(acc2);
+    out3 = hsum_avx512(acc3);
+
+    // Scalar tail
+    for (; i < len; i++) {
+        float v = inp[i];
+        out0 += ggml_fp16_to_fp32(w0[i]) * v;
+        out1 += ggml_fp16_to_fp32(w1[i]) * v;
+        out2 += ggml_fp16_to_fp32(w2[i]) * v;
+        out3 += ggml_fp16_to_fp32(w3[i]) * v;
+    }
+}
+
+// Single-row fallback (AVX-512)
+static inline float dot_f32_avx512(const float* a, const float* b, int64_t K) {
+    __m512 sum0 = _mm512_setzero_ps();
+    __m512 sum1 = _mm512_setzero_ps();
+    int64_t i = 0;
+    for (; i + 31 < K; i += 32) {
+        sum0 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i),      _mm512_loadu_ps(b + i),      sum0);
+        sum1 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i + 16), _mm512_loadu_ps(b + i + 16), sum1);
+    }
+    for (; i + 15 < K; i += 16) {
+        sum0 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i), sum0);
+    }
+    sum0 = _mm512_add_ps(sum0, sum1);
+    float result = hsum_avx512(sum0);
+    for (; i < K; i++) result += a[i] * b[i];
+    return result;
+}
+
+static inline float dot_f16_f32_avx512(const ggml_fp16_t* a, const float* b, int64_t K) {
+    __m512 sum0 = _mm512_setzero_ps();
+    __m512 sum1 = _mm512_setzero_ps();
+    int64_t i = 0;
+    for (; i + 31 < K; i += 32) {
+        sum0 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(a+i))),    _mm512_loadu_ps(b+i),    sum0);
+        sum1 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(a+i+16))), _mm512_loadu_ps(b+i+16), sum1);
+    }
+    for (; i + 15 < K; i += 16) {
+        sum0 = _mm512_fmadd_ps(_mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)(a+i))), _mm512_loadu_ps(b+i), sum0);
+    }
+    sum0 = _mm512_add_ps(sum0, sum1);
+    float result = hsum_avx512(sum0);
+    for (; i < K; i++) result += ggml_fp16_to_fp32(a[i]) * b[i];
+    return result;
+}
+
+// ===========================================================================
+// AVX2 KERNELS (fallback for CPUs without AVX-512)
+// ===========================================================================
+
 static inline void dot4_f32_avx2(
         const float* w0, const float* w1,
         const float* w2, const float* w3,
@@ -124,7 +300,6 @@ static inline void dot4_f16_f32_avx2(
     }
 }
 
-// Single-row fallback (for tail rows when N % 4 != 0)
 static inline float dot_f32_avx2(const float* a, const float* b, int64_t K) {
     __m256 sum0 = _mm256_setzero_ps();
     __m256 sum1 = _mm256_setzero_ps();
@@ -157,6 +332,47 @@ static inline float dot_f16_f32_avx2(const ggml_fp16_t* a, const float* b, int64
     float result = hsum_avx2(sum0);
     for (; i < K; i++) result += ggml_fp16_to_fp32(a[i]) * b[i];
     return result;
+}
+
+// ===========================================================================
+// DISPATCH WRAPPERS (select AVX-512 or AVX2 at runtime)
+// ===========================================================================
+
+static inline void dot4_f32(const float* w0, const float* w1, const float* w2, const float* w3,
+                            const float* inp, int64_t len,
+                            float& out0, float& out1, float& out2, float& out3) {
+    if (g_has_avx512) {
+        dot4_f32_avx512(w0, w1, w2, w3, inp, len, out0, out1, out2, out3);
+    } else {
+        dot4_f32_avx2(w0, w1, w2, w3, inp, len, out0, out1, out2, out3);
+    }
+}
+
+static inline void dot4_f16_f32(const ggml_fp16_t* w0, const ggml_fp16_t* w1,
+                                const ggml_fp16_t* w2, const ggml_fp16_t* w3,
+                                const float* inp, int64_t len,
+                                float& out0, float& out1, float& out2, float& out3) {
+    if (g_has_avx512) {
+        dot4_f16_f32_avx512(w0, w1, w2, w3, inp, len, out0, out1, out2, out3);
+    } else {
+        dot4_f16_f32_avx2(w0, w1, w2, w3, inp, len, out0, out1, out2, out3);
+    }
+}
+
+static inline float dot_f32(const float* a, const float* b, int64_t K) {
+    if (g_has_avx512) {
+        return dot_f32_avx512(a, b, K);
+    } else {
+        return dot_f32_avx2(a, b, K);
+    }
+}
+
+static inline float dot_f16_f32(const ggml_fp16_t* a, const float* b, int64_t K) {
+    if (g_has_avx512) {
+        return dot_f16_f32_avx512(a, b, K);
+    } else {
+        return dot_f16_f32_avx2(a, b, K);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +415,7 @@ static void group_by_expert(const int32_t* ids_data,
 //   - 4-row micro-kernel: loads input vector once, dots 4 weight rows
 //   - Software prefetching for next weight rows
 //   - Dynamic scheduling across row tiles for load balance
+//   - Runtime dispatch: AVX-512 (32 floats/iter) or AVX2 (16 floats/iter)
 // ---------------------------------------------------------------------------
 void custom_moe_compute(struct ggml_tensor* dst,
                         const struct ggml_tensor* experts,
@@ -282,8 +499,8 @@ void custom_moe_compute(struct ggml_tensor* dst,
                         }
 
                         float d0, d1, d2, d3;
-                        dot4_f16_f32_avx2(w0, w1, w2, w3, inp_vec, k_len,
-                                          d0, d1, d2, d3);
+                        dot4_f16_f32(w0, w1, w2, w3, inp_vec, k_len,
+                                     d0, d1, d2, d3);
                         if (first_k) {
                             dst_vec[r]   = d0; dst_vec[r+1] = d1;
                             dst_vec[r+2] = d2; dst_vec[r+3] = d3;
@@ -293,8 +510,8 @@ void custom_moe_compute(struct ggml_tensor* dst,
                         }
                     }
                     for (; r < r_end; r++) {
-                        float d = dot_f16_f32_avx2(exp_base + r * exp_stride_row + k0,
-                                                   inp_vec, k_len);
+                        float d = dot_f16_f32(exp_base + r * exp_stride_row + k0,
+                                              inp_vec, k_len);
                         if (first_k) dst_vec[r] = d;
                         else         dst_vec[r] += d;
                     }
@@ -341,8 +558,8 @@ void custom_moe_compute(struct ggml_tensor* dst,
                         }
 
                         float d0, d1, d2, d3;
-                        dot4_f32_avx2(w0, w1, w2, w3, inp_vec, k_len,
-                                      d0, d1, d2, d3);
+                        dot4_f32(w0, w1, w2, w3, inp_vec, k_len,
+                                 d0, d1, d2, d3);
                         if (first_k) {
                             dst_vec[r]   = d0; dst_vec[r+1] = d1;
                             dst_vec[r+2] = d2; dst_vec[r+3] = d3;
@@ -352,8 +569,8 @@ void custom_moe_compute(struct ggml_tensor* dst,
                         }
                     }
                     for (; r < r_end; r++) {
-                        float d = dot_f32_avx2(exp_base + r * exp_stride_row + k0,
-                                               inp_vec, k_len);
+                        float d = dot_f32(exp_base + r * exp_stride_row + k0,
+                                          inp_vec, k_len);
                         if (first_k) dst_vec[r] = d;
                         else         dst_vec[r] += d;
                     }
@@ -374,10 +591,12 @@ void custom_moe_compute(struct ggml_tensor* dst,
 // and is reused across J_TILE columns of B.
 //
 // Working set per (row_tile, k_tile, column):
-//   A tile: N_TILE × K_TILE × elem_size  (~256KB f16, fits L2)
+//   A tile: N_TILE × K_TILE × elem_size  (~256KB f16, 25% of L2)
 //   B col:  K_TILE × 4                   (~4KB, fits L1d)
+//
+// Runtime dispatch: AVX-512 (32 floats/iter) or AVX2 (16 floats/iter)
 // ---------------------------------------------------------------------------
-static constexpr int64_t J_TILE = 24;  // columns of B per tile (was 16, moderate increase)
+static constexpr int64_t J_TILE = 24;  // columns of B per tile
 
 void custom_matmul_compute(struct ggml_tensor* dst,
                            const struct ggml_tensor* A,
@@ -421,13 +640,13 @@ void custom_matmul_compute(struct ggml_tensor* dst,
                         const ggml_fp16_t* w0 = a_data + i * K + k0;
 
                         float d0, d1, d2, d3;
-                        dot4_f16_f32_avx2(w0, w0+K, w0+2*K, w0+3*K,
-                                          b_col, k_len, d0, d1, d2, d3);
+                        dot4_f16_f32(w0, w0+K, w0+2*K, w0+3*K,
+                                     b_col, k_len, d0, d1, d2, d3);
                         if (first_k) { d_col[i]=d0; d_col[i+1]=d1; d_col[i+2]=d2; d_col[i+3]=d3; }
                         else         { d_col[i]+=d0; d_col[i+1]+=d1; d_col[i+2]+=d2; d_col[i+3]+=d3; }
                     }
                     for (; i < i_end; i++) {
-                        float d = dot_f16_f32_avx2(a_data + i*K + k0, b_col, k_len);
+                        float d = dot_f16_f32(a_data + i*K + k0, b_col, k_len);
                         if (first_k) d_col[i] = d;
                         else         d_col[i] += d;
                     }
@@ -457,13 +676,13 @@ void custom_matmul_compute(struct ggml_tensor* dst,
                         const float* w0 = a_data + i * K + k0;
 
                         float d0, d1, d2, d3;
-                        dot4_f32_avx2(w0, w0+K, w0+2*K, w0+3*K,
-                                      b_col, k_len, d0, d1, d2, d3);
+                        dot4_f32(w0, w0+K, w0+2*K, w0+3*K,
+                                 b_col, k_len, d0, d1, d2, d3);
                         if (first_k) { d_col[i]=d0; d_col[i+1]=d1; d_col[i+2]=d2; d_col[i+3]=d3; }
                         else         { d_col[i]+=d0; d_col[i+1]+=d1; d_col[i+2]+=d2; d_col[i+3]+=d3; }
                     }
                     for (; i < i_end; i++) {
-                        float d = dot_f32_avx2(a_data + i*K + k0, b_col, k_len);
+                        float d = dot_f32(a_data + i*K + k0, b_col, k_len);
                         if (first_k) d_col[i] = d;
                         else         d_col[i] += d;
                     }
