@@ -51,6 +51,43 @@ static void fill_routing_ids(struct ggml_tensor* ids, int n_experts,
     }
 }
 
+// Custom routing with specified per-expert token counts
+static void fill_routing_ids_custom(struct ggml_tensor* ids,
+                                    const std::vector<int>& expert_token_counts,
+                                    int n_experts_used, int n_tokens, uint32_t seed) {
+    int32_t* data = reinterpret_cast<int32_t*>(ids->data);
+    uint32_t state = seed;
+
+    std::vector<std::pair<int, int>> expert_tokens;
+    for (size_t e = 0; e < expert_token_counts.size(); e++) {
+        expert_tokens.push_back({static_cast<int>(e), expert_token_counts[e]});
+    }
+
+    for (size_t i = expert_tokens.size() - 1; i > 0; i--) {
+        size_t j = xorshift32(state) % (i + 1);
+        std::swap(expert_tokens[i], expert_tokens[j]);
+    }
+
+    std::vector<int> assigned_experts;
+    for (const auto& [expert_id, count] : expert_tokens) {
+        for (int i = 0; i < count; i++) {
+            assigned_experts.push_back(expert_id);
+        }
+    }
+
+    for (size_t i = assigned_experts.size() - 1; i > 0; i--) {
+        size_t j = xorshift32(state) % (i + 1);
+        std::swap(assigned_experts[i], assigned_experts[j]);
+    }
+
+    size_t assign_idx = 0;
+    for (int t = 0; t < n_tokens; t++) {
+        for (int e = 0; e < n_experts_used; e++) {
+            data[t * n_experts_used + e] = assigned_experts[assign_idx++];
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // bench_custom_moe -- benchmark standalone custom MoE op
 // ---------------------------------------------------------------------------
@@ -207,6 +244,7 @@ LayerBenchResult bench_custom_layer(const LayerConfig& cfg,
         int n_experts;
         int n_experts_used;
         int n_tokens;
+        std::vector<int> expert_token_counts;
     };
     std::vector<TensorFillInfo> fill_list;
 
@@ -225,8 +263,8 @@ LayerBenchResult bench_custom_layer(const LayerConfig& cfg,
             struct ggml_tensor* b   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, M);
             struct ggml_tensor* d   = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, N, M);
 
-            fill_list.push_back({a, seed_counter++, false, 0, 0, 0});
-            fill_list.push_back({b, seed_counter++, false, 0, 0, 0});
+            fill_list.push_back({a, seed_counter++, false, 0, 0, 0, {}});
+            fill_list.push_back({b, seed_counter++, false, 0, 0, 0, {}});
 
             custom_ops.push_back({CustomOp::MATMUL, d, a, b, nullptr});
             flops = 2.0 * M * N * K;
@@ -239,12 +277,13 @@ LayerBenchResult bench_custom_layer(const LayerConfig& cfg,
             struct ggml_tensor* ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, M);
             struct ggml_tensor* d   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, N, n_used, M);
 
-            fill_list.push_back({exp, seed_counter++, false, 0, 0, 0});
-            fill_list.push_back({b,   seed_counter++, false, 0, 0, 0});
+            fill_list.push_back({exp, seed_counter++, false, 0, 0, 0, {}});
+            fill_list.push_back({b,   seed_counter++, false, 0, 0, 0, {}});
             fill_list.push_back({ids, seed_counter++, true,
                                  static_cast<int>(n_exp),
                                  static_cast<int>(n_used),
-                                 static_cast<int>(M)});
+                                 static_cast<int>(M),
+                                 op.expert_token_counts});
 
             custom_ops.push_back({CustomOp::MOE, d, exp, b, ids});
             flops = 2.0 * M * N * K * n_used;
@@ -266,8 +305,13 @@ LayerBenchResult bench_custom_layer(const LayerConfig& cfg,
     // Fill tensors
     for (const auto& fi : fill_list) {
         if (fi.is_routing_ids) {
-            fill_routing_ids(fi.tensor, fi.n_experts, fi.n_experts_used,
-                             fi.n_tokens, fi.seed);
+            if (!fi.expert_token_counts.empty()) {
+                fill_routing_ids_custom(fi.tensor, fi.expert_token_counts,
+                                        fi.n_experts_used, fi.n_tokens, fi.seed);
+            } else {
+                fill_routing_ids(fi.tensor, fi.n_experts, fi.n_experts_used,
+                                 fi.n_tokens, fi.seed);
+            }
         } else {
             fill_tensor_deterministic(fi.tensor, fi.seed);
         }

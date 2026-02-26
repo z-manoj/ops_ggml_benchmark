@@ -64,6 +64,52 @@ LayerConfig parse_layer_config(const std::string& path) {
                 exit(1);
             }
             cfg.ops.push_back(op);
+        } else if (keyword == "expert_tokens") {
+            // Optional: per-expert token counts for previous mul_mat_id op
+            // NOTE: All counts must be on ONE line (no multi-line continuation)
+            if (cfg.ops.empty() || cfg.ops.back().op_type != "mul_mat_id") {
+                fprintf(stderr, "error: %s:%d: expert_tokens must follow mul_mat_id\n",
+                        path.c_str(), lineno);
+                exit(1);
+            }
+
+            auto& op = cfg.ops.back();
+
+            // Read rest of current line only (no continuation)
+            std::string counts_str;
+            std::getline(ss, counts_str);
+
+            // Parse comma-separated integers
+            std::istringstream css(counts_str);
+            int count;
+            char comma;
+            while (css >> count) {
+                if (count < 0) {
+                    fprintf(stderr, "error: %s:%d: negative token count\n",
+                            path.c_str(), lineno);
+                    exit(1);
+                }
+                op.expert_token_counts.push_back(count);
+                css >> comma; // consume comma or whitespace
+            }
+
+            if ((int)op.expert_token_counts.size() != op.n_experts) {
+                fprintf(stderr, "error: %s:%d: expert_tokens count mismatch "
+                        "(got %d, expected %d)\n",
+                        path.c_str(), lineno,
+                        (int)op.expert_token_counts.size(), op.n_experts);
+                exit(1);
+            }
+
+            // Verify sum equals M * n_experts_used (total token-expert assignments)
+            int sum = 0;
+            for (int c : op.expert_token_counts) sum += c;
+            int expected = op.m * op.n_experts_used;
+            if (sum != expected) {
+                fprintf(stderr, "error: %s:%d: expert_tokens sum (%d) != M * n_experts_used (%d * %d = %d)\n",
+                        path.c_str(), lineno, sum, op.m, op.n_experts_used, expected);
+                exit(1);
+            }
         } else {
             fprintf(stderr, "error: %s:%d: unknown keyword '%s'\n",
                     path.c_str(), lineno, keyword.c_str());

@@ -14,6 +14,11 @@ struct LayerOpDesc {
     // mul_mat_id specific
     int         n_experts      = 0;
     int         n_experts_used = 0;
+
+    // Optional: per-expert token counts for realistic routing
+    // If empty, uses uniform/random routing
+    // If specified, must have n_experts elements that sum to M
+    std::vector<int> expert_token_counts;
 };
 
 // A parsed layer config file.

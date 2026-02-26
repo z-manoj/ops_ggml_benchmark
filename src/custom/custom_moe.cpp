@@ -9,10 +9,11 @@
 #include <immintrin.h>
 
 // ---------------------------------------------------------------------------
-// Cache-blocking tile sizes (tuned for i5-8300H: 32KB L1d, 256KB L2)
+// Cache-blocking tile sizes (tuned for AMD EPYC 9R14: 32KB L1d, 1MB L2, 384MB L3)
+// Conservative 2x increase to exploit larger L2 without overshooting
 // ---------------------------------------------------------------------------
-static constexpr int64_t N_TILE = 64;   // output rows per tile
-static constexpr int64_t K_TILE = 512;  // inner-dim elements per tile
+static constexpr int64_t N_TILE = 128;   // output rows per tile (was 64, 2x larger)
+static constexpr int64_t K_TILE = 1024;  // inner-dim elements per tile (was 512, 2x larger)
 
 // ---------------------------------------------------------------------------
 // AVX2+FMA horizontal reduction helper
@@ -373,10 +374,10 @@ void custom_moe_compute(struct ggml_tensor* dst,
 // and is reused across J_TILE columns of B.
 //
 // Working set per (row_tile, k_tile, column):
-//   A tile: N_TILE × K_TILE × elem_size  (~128KB f32, fits L2)
-//   B col:  K_TILE × 4                   (~2KB, streams through L1)
+//   A tile: N_TILE × K_TILE × elem_size  (~256KB f16, fits L2)
+//   B col:  K_TILE × 4                   (~4KB, fits L1d)
 // ---------------------------------------------------------------------------
-static constexpr int64_t J_TILE = 16;  // columns of B per tile
+static constexpr int64_t J_TILE = 24;  // columns of B per tile (was 16, moderate increase)
 
 void custom_matmul_compute(struct ggml_tensor* dst,
                            const struct ggml_tensor* A,

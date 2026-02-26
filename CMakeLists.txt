@@ -30,9 +30,10 @@ target_include_directories(ops_ggml_benchmark PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/custom
 )
 
-# AVX2+FMA+F16C for custom SIMD kernels
+# AVX-512 + BF16 for custom SIMD kernels (AMD EPYC 9R14 optimized)
+# Fallback to AVX2 at runtime if CPU doesn't support AVX-512
 set_source_files_properties(src/custom/custom_moe.cpp PROPERTIES
-    COMPILE_FLAGS "-mavx2 -mfma -mf16c"
+    COMPILE_FLAGS "-mavx2 -mfma -mf16c -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx512bf16"
 )
 
 # Link against GGML library targets provided by llama.cpp
