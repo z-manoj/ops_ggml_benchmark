@@ -22,7 +22,9 @@ set(BENCHMARK_SOURCES
     src/benchmark.cpp
     src/ggml_utils.cpp
     src/ggml_matmul_bench.cpp
+    src/routing_utils.cpp
     src/layer_config.cpp
+    src/moe_config.cpp
     src/layer_bench.cpp
     src/layer_bench_ggml.cpp
 )

@@ -1,5 +1,6 @@
 #include "ggml_matmul_bench.h"
 #include "ggml_utils.h"
+#include "routing_utils.h"
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -141,11 +142,6 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     double flops = 2.0 * M * N * K;
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
-    // 9. Cleanup
-    ggml_gallocr_free(allocr);
-    ggml_free(ctx);
-    ggml_backend_free(backend);
-
     BenchResult result;
     result.min_ms = min_ms;
     result.avg_ms = avg_ms;
@@ -155,6 +151,18 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     result.op_creation_ms = op_creation_ms;
     result.op_execution_ms = avg_ms;  // Per-iteration average
     result.other_ms = 0.0;
+
+    // Copy output for verification if requested
+    if (desc.verify_output) {
+        size_t output_size = M * N;
+        result.output_data.resize(output_size);
+        ggml_backend_tensor_get(c, result.output_data.data(), 0, output_size * sizeof(float));
+    }
+
+    // 9. Cleanup
+    ggml_gallocr_free(allocr);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
 
     return result;
 }
@@ -262,15 +270,14 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     fill_tensor_deterministic(as, 42, using_repack);
     fill_tensor_deterministic(b, 137, false);  // b is always F32, no repack needed
 
-    // Fill routing ids: cycle through experts deterministically
-    {
-        int32_t* id_data = reinterpret_cast<int32_t*>(ids->data);
-        for (int64_t token = 0; token < N; token++) {
-            for (int64_t e = 0; e < n_used; e++) {
-                id_data[token * n_used + e] = static_cast<int32_t>((token + e) % n_exp);
-            }
-        }
-    }
+    // Generate routing ids using shared routing utilities
+    std::vector<int32_t> routing_ids = generate_routing_ids(
+        N, n_exp, n_used,
+        desc.expert_token_counts,
+        desc.routing_pattern,
+        desc.routing_seed
+    );
+    memcpy(ids->data, routing_ids.data(), routing_ids.size() * sizeof(int32_t));
     auto t_op_end = std::chrono::steady_clock::now();
     double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
@@ -299,10 +306,6 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     double flops = 2.0 * M * K * n_used * N;
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
-    ggml_gallocr_free(allocr);
-    ggml_free(ctx);
-    ggml_backend_free(backend);
-
     BenchResult result;
     result.min_ms = min_ms;
     result.avg_ms = avg_ms;
@@ -312,6 +315,17 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     result.op_creation_ms = op_creation_ms;
     result.op_execution_ms = avg_ms;  // Per-iteration average
     result.other_ms = 0.0;
+
+    // Copy output for verification if requested
+    if (desc.verify_output) {
+        size_t output_size = M * n_used * N;
+        result.output_data.resize(output_size);
+        ggml_backend_tensor_get(c, result.output_data.data(), 0, output_size * sizeof(float));
+    }
+
+    ggml_gallocr_free(allocr);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
 
     return result;
 }

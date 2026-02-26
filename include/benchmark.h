@@ -2,6 +2,7 @@
 
 #include "op_desc.h"
 #include <string>
+#include <vector>
 
 // Benchmark timing results with detailed breakdowns.
 struct BenchResult {
@@ -15,6 +16,9 @@ struct BenchResult {
     double op_creation_ms  = 0.0;     // Operator/graph setup
     double op_execution_ms = 0.0;     // Actual compute time
     double other_ms        = 0.0;     // Other operations (memory allocation, etc.)
+
+    // Optional output data for verification (F32 format)
+    std::vector<float> output_data;
 };
 
 // Run the benchmark described by |desc| and return timing results.

@@ -3,11 +3,13 @@
 #include "ggml_utils.h"
 #include "layer_config.h"
 #include "layer_bench.h"
+#include "moe_config.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -91,6 +93,7 @@ static void print_usage(const char* prog) {
         "  --op <matmul|matmul_id|layer>\n"
         "                            Operator to benchmark (default: matmul)\n"
         "  --config <file>           Layer config file (required when --op layer)\n"
+        "  --moe-config <file>       MoE config file (.moe format) for matmul_id\n"
         "  --m <int>                 M dimension (default: 512)\n"
         "  --n <int>                 N dimension (default: 512)\n"
         "  --k <int>                 K dimension (default: 512)\n"
@@ -111,6 +114,14 @@ static void print_usage(const char* prog) {
         "  --warmup <int>            Warmup iterations (default: 10)\n"
         "  --n_experts <int>         Total expert count for matmul_id (default: 1)\n"
         "  --n_experts_used <int>    Active experts per token for matmul_id (default: 1)\n"
+        "  --routing_pattern <pattern>\n"
+        "                            Routing pattern for matmul_id (default: uniform)\n"
+        "                            Options: uniform, custom, random, skewed\n"
+        "  --expert_token_counts <counts>\n"
+        "                            Comma-separated per-expert token counts for custom routing\n"
+        "                            e.g., 24,30,15,20,18,22,25,26\n"
+        "  --routing_seed <int>      Seed for random/skewed routing (default: 42)\n"
+        "  --routing_ids_file <file> Load pre-generated routing IDs from file\n"
         "  --help                    Show this message\n",
         prog);
 }
@@ -128,6 +139,7 @@ int main(int argc, char** argv) {
     std::string batch_file;
     std::string shapes_arg;
     std::string config_file;
+    std::string moe_config_file;
 
     for (int i = 1; i < argc; i++) {
         auto arg = [&](const char* name) {
@@ -143,6 +155,7 @@ int main(int argc, char** argv) {
 
         if (arg("--op"))      { base.op_name = next(); }
         else if (arg("--config")) { config_file = next(); }
+        else if (arg("--moe-config")) { moe_config_file = next(); }
         else if (arg("--backend")) { base.backend = next(); }
         else if (arg("--m"))  { base.m = atoi(next()); }
         else if (arg("--n"))  { base.n = atoi(next()); }
@@ -181,6 +194,20 @@ int main(int argc, char** argv) {
         else if (arg("--warmup"))  { base.warmup  = atoi(next()); }
         else if (arg("--n_experts")) { base.n_experts = atoi(next()); }
         else if (arg("--n_experts_used")) { base.n_experts_used = atoi(next()); }
+        else if (arg("--routing_pattern")) { base.routing_pattern = next(); }
+        else if (arg("--routing_seed")) { base.routing_seed = atoi(next()); }
+        else if (arg("--routing_ids_file")) { base.routing_ids_file = next(); }
+        else if (arg("--expert_token_counts")) {
+            std::string counts_str = next();
+            // Parse comma-separated: "24,30,15,20,18,22,25,26"
+            std::istringstream ss(counts_str);
+            std::string token;
+            base.expert_token_counts.clear();
+            while (std::getline(ss, token, ',')) {
+                base.expert_token_counts.push_back(atoi(token.c_str()));
+            }
+        }
+        else if (arg("--verify")) { base.verify_output = true; }
         else if (arg("--help") || arg("-h")) {
             print_usage(argv[0]);
             return 0;
@@ -252,6 +279,17 @@ int main(int argc, char** argv) {
             fprintf(stderr, "error: quantized weights (q8_0, q4_0) require f32 input for GGML backend\n");
             return 1;
         }
+    }
+
+    // --- MoE config mode (.moe file) ---
+    if (!moe_config_file.empty()) {
+        OpDesc desc = parse_moe_config(moe_config_file);
+
+        // Run the matmul_id benchmark
+        BenchResult result = run_benchmark(desc);
+        print_results(desc, result);
+
+        return 0;
     }
 
     // --- Layer benchmark mode ---
@@ -344,8 +382,94 @@ int main(int argc, char** argv) {
         desc.n = shapes[i].n;
         desc.k = shapes[i].k;
 
-        BenchResult result = run_benchmark(desc);
-        print_results(desc, result);
+        // Verification mode: run both backends and compare outputs
+        if (desc.verify_output) {
+            printf("========================================================================\n");
+            printf("VERIFICATION MODE: Comparing GGML vs ZenDNN outputs\n");
+            printf("========================================================================\n\n");
+
+            // Run GGML
+            desc.backend = "ggml";
+            BenchResult ggml_result = run_benchmark(desc);
+            printf("GGML:   ");
+            print_results(desc, ggml_result);
+
+            // Run ZenDNN
+            desc.backend = "zendnn";
+            BenchResult zendnn_result = run_benchmark(desc);
+            printf("ZenDNN: ");
+            print_results(desc, zendnn_result);
+
+            // Compare outputs
+            if (ggml_result.output_data.empty() || zendnn_result.output_data.empty()) {
+                fprintf(stderr, "\nERROR: Output data not captured for verification\n");
+                return 1;
+            }
+
+            if (ggml_result.output_data.size() != zendnn_result.output_data.size()) {
+                fprintf(stderr, "\nERROR: Output sizes don't match! GGML=%zu, ZenDNN=%zu\n",
+                       ggml_result.output_data.size(), zendnn_result.output_data.size());
+                return 1;
+            }
+
+            size_t n = ggml_result.output_data.size();
+            double max_rel_diff = 0.0;
+            double avg_rel_diff = 0.0;
+            size_t num_mismatches = 0;
+            // Relative tolerance based on data type: BF16 has only 7-bit mantissa
+            // Accumulation errors in large matmuls can compound
+            const double rel_tolerance = (desc.src_dtype == GGML_TYPE_BF16 || desc.wei_dtype == GGML_TYPE_BF16)
+                                         ? 0.05  // 5% for BF16 (acceptable rounding + accumulation error)
+                                         : 1e-4; // 0.01% for F32
+
+            for (size_t j = 0; j < n; j++) {
+                double abs_diff = std::abs(ggml_result.output_data[j] - zendnn_result.output_data[j]);
+                double magnitude = std::max(std::abs(ggml_result.output_data[j]), std::abs(zendnn_result.output_data[j]));
+                double rel_diff = (magnitude > 1e-6) ? (abs_diff / magnitude) : abs_diff;
+
+                avg_rel_diff += rel_diff;
+                if (rel_diff > max_rel_diff) max_rel_diff = rel_diff;
+                if (rel_diff > rel_tolerance) num_mismatches++;
+            }
+            avg_rel_diff /= n;
+
+            printf("\n========================================================================\n");
+            printf("VERIFICATION RESULTS:\n");
+            printf("========================================================================\n");
+            printf("Total elements:     %zu\n", n);
+            printf("Max rel difference: %.6f%% \n", max_rel_diff * 100);
+            printf("Avg rel difference: %.6f%%\n", avg_rel_diff * 100);
+            printf("Rel tolerance:      %.6f%%\n", rel_tolerance * 100);
+            printf("Mismatches:         %zu (%.2f%%)\n", num_mismatches, 100.0 * num_mismatches / n);
+
+            if (num_mismatches == 0) {
+                printf("\n✓ PASS: Outputs match within tolerance!\n");
+            } else {
+                printf("\n✗ FAIL: %zu elements exceed relative tolerance\n", num_mismatches);
+                // Print first few mismatches
+                size_t printed = 0;
+                for (size_t j = 0; j < n && printed < 10; j++) {
+                    double abs_diff = std::abs(ggml_result.output_data[j] - zendnn_result.output_data[j]);
+                    double magnitude = std::max(std::abs(ggml_result.output_data[j]), std::abs(zendnn_result.output_data[j]));
+                    double rel_diff = (magnitude > 1e-6) ? (abs_diff / magnitude) : abs_diff;
+
+                    if (rel_diff > rel_tolerance) {
+                        printf("  [%zu]: GGML=%.6f, ZenDNN=%.6f, rel_diff=%.2f%%\n",
+                               j, ggml_result.output_data[j], zendnn_result.output_data[j], rel_diff * 100);
+                        printed++;
+                    }
+                }
+                if (num_mismatches > 10) {
+                    printf("  ... (%zu more mismatches)\n", num_mismatches - 10);
+                }
+                return 1;
+            }
+            printf("========================================================================\n");
+        } else {
+            // Normal mode: just run the benchmark
+            BenchResult result = run_benchmark(desc);
+            print_results(desc, result);
+        }
 
         // Write to CSV (write header only for first entry)
         // write_csv_results(csv_filename, desc, result, i == 0);

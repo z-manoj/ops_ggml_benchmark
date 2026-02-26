@@ -39,12 +39,12 @@ All compute is performed by existing GGML CPU kernels and ZenDNN primitives.
 
 | Feature              | GGML Backend | ZenDNN Backend |
 |----------------------|--------------|----------------|
-| **Operators**        | matmul, matmul_id (MoE), layer | matmul, layer (dense only) |
+| **Operators**        | matmul, matmul_id (MoE), layer | matmul, matmul_id (MoE), layer (dense only) |
 | **Source Types**     | **f32, bf16** | **f32, bf16** |
 | **Weight Types**     | **f32, f16, bf16, q8_0, q4_0** | **f32, bf16** |
 | **Output Type**      | **f32 (fixed)** | **f32 (fixed)** |
 | **Quantization**     | ✅ q8_0, q4_0 with repack | ❌ Not supported |
-| **MoE Support**      | ✅ matmul_id, MoE layers | ❌ Dense only |
+| **MoE Support**      | ✅ matmul_id, MoE layers | ✅ matmul_id via Group GEMM |
 | **Batched Matmul**   | ✅ Via shape dimensions | ✅ Via shape dimensions |
 | **Warmup Iterations**| ✅ Configurable | ✅ Configurable |
 
@@ -130,24 +130,81 @@ When using `--wei_dtype q4_0`, the benchmark automatically enables GGML's repack
 | Operator       | GGML function      | Description                     | GGML | ZenDNN |
 |----------------|---------------------|---------------------------------|------|--------|
 | `matmul`       | `ggml_mul_mat`      | Dense matrix multiplication     | ✅   | ✅     |
-| `matmul_id`    | `ggml_mul_mat_id`   | Expert-routed matmul (MoE)      | ✅   | ❌     |
+| `matmul_id`    | `ggml_mul_mat_id`   | Expert-routed matmul (MoE)      | ✅   | ✅ (Group GEMM) |
 | `layer`        | multi-node graph    | Full transformer layer GEMM workload | ✅   | ✅ (dense only) |
 
 ### matmul_id (MoE) Implementation Details
 
-The `matmul_id` operator benchmarks expert-routed matmul for Mixture-of-Experts models:
+The `matmul_id` operator benchmarks expert-routed matmul for Mixture-of-Experts models.
 
 **Tensors created:**
 - `as` (3D): Stacked expert weight matrices `[K, M, n_experts]` - all experts in one tensor
 - `b` (3D): Input activations `[K, n_experts_used, N]` - N tokens, each routed to n_experts_used experts
 - `ids` (2D, int32): Routing indices `[n_experts_used, N]` - which experts each token uses
 
-**Routing logic:**
-- Expert weights filled with deterministic random data (all experts)
-- Routing IDs cycle through experts: token 0 → experts [0,1], token 1 → experts [1,2], etc.
-- GGML's `ggml_mul_mat_id` extracts selected expert weights per token and computes matmuls
+**Dimensions (matching llama.cpp naming):**
+- `M` = output features (e.g., 14336 for FFN)
+- `N` = number of tokens (e.g., 512 sequence length)
+- `K` = hidden dimension (e.g., 4096 model dimension)
 
-**Example:** For 8 experts with 2 active per token, the 3D `as` tensor contains all 8 expert weight matrices stacked. The `ids` tensor tells GGML which 2 experts each token should use.
+**Backend Implementations:**
+
+**GGML Backend:**
+- Uses `ggml_mul_mat_id` which handles routing internally
+- Automatically groups tokens by expert and batches operations
+- Timing includes complete matmul_id operation
+
+**ZenDNN Backend:**
+- Implements MoE via **group GEMM** (one batched operation per expert)
+- **Algorithm:**
+  1. Group (token, slot) pairs by expert ID from routing indices
+  2. For each expert with routed tokens:
+     - **Gather**: Copy input activations for tokens assigned to this expert
+     - Setup GEMM: `output[num_tokens, M] = input[num_tokens, K] × expert_weights[K, M]`
+  3. **Execute** all expert GEMMs in parallel via `group_gemm_direct()`
+  4. **Scatter**: Copy expert outputs back to correct positions
+- **Timing**: Measures **gather + compute + scatter** (complete matmul_id operation, apple-to-apple with GGML)
+- Reduces operations from `N × n_experts_used` individual matmuls to `n_experts` batched matmuls
+
+### Configurable Routing for matmul_id
+
+The benchmark supports multiple routing patterns for realistic MoE load testing:
+
+**Routing Patterns:**
+- `uniform` (default): Equal distribution across all experts
+- `custom`: Explicit per-expert token counts via `--expert_token_counts`
+- `random`: Random but balanced distribution with seed
+- `skewed`: 80/20 rule (top 20% experts get 80% of tokens)
+
+**Command-Line Options:**
+```bash
+--routing_pattern <uniform|custom|random|skewed>   # Routing pattern (default: uniform)
+--expert_token_counts <counts>                      # Comma-separated counts for custom
+--routing_seed <int>                                # Seed for reproducibility (default: 42)
+```
+
+**Example - Custom Routing:**
+```bash
+# Specify exactly how many tokens each expert receives
+# Format: comma-separated counts, sum must equal N × n_experts_used
+./build/ops_ggml_benchmark --op matmul_id \
+  --m 4096 --n 512 --k 4096 \
+  --n_experts 8 --n_experts_used 2 \
+  --routing_pattern custom \
+  --expert_token_counts "126,323,80,68,256,37,15,119" \
+  --threads 8
+
+# Expert 1 gets 323 assignments (hot), Expert 6 gets 15 assignments (cold)
+# Sum: 126+323+80+68+256+37+15+119 = 1024 = 512 tokens × 2 experts_used ✓
+```
+
+**Why Configurable Routing:**
+- **Fair Comparison**: Both GGML and ZenDNN use identical routing from same seed
+- **Realistic Testing**: Test performance under load imbalance (some experts are "hot")
+- **Reproducibility**: Same seed guarantees same routing across runs
+- **Debugging**: Verify backend behavior with specific expert distributions
+
+**Implementation:** Both backends call `generate_routing_ids()` with identical parameters, ensuring apple-to-apple comparison.
 
 ## How to build
 
@@ -264,20 +321,63 @@ done
     --batch shapes.txt --shapes 2048x2048x2048
 ```
 
-### MoE (GGML backend only)
+### matmul_id (MoE operator)
 
 ```bash
-# Expert-routed matmul (MoE) - GGML backend only
+# Expert-routed matmul (MoE) - both GGML and ZenDNN backends supported
 # Default: 1 expert (simplest case, closest to regular matmul)
 ./build/ops_ggml_benchmark --backend ggml --op matmul_id \
     --m 2048 --n 64 --k 2048 \
-    --src_dtype f32 --wei_dtype q4_0 --threads 16
+    --src_dtype f32 --wei_dtype q4_0 --threads 8
 
 # For realistic MoE testing: 8 experts, 2 active per token
 ./build/ops_ggml_benchmark --backend ggml --op matmul_id \
-    --m 2048 --n 64 --k 2048 \
+    --m 4096 --n 512 --k 4096 \
     --src_dtype f32 --wei_dtype q4_0 \
-    --n_experts 8 --n_experts_used 2 --threads 16
+    --n_experts 8 --n_experts_used 2 --threads 8
+
+# ZenDNN backend with custom routing
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --backend zendnn --op matmul_id \
+  --m 4096 --n 512 --k 4096 \
+  --src_dtype bf16 --wei_dtype bf16 \
+  --n_experts 8 --n_experts_used 2 \
+  --routing_pattern custom \
+  --expert_token_counts "126,323,80,68,256,37,15,119" \
+  --threads 8
+
+# MoE config file (simpler than command-line for complex configs)
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --moe-config configs/mixtral_8x2_bf16.moe
+```
+
+**MoE Config Files (.moe format):**
+
+The benchmark supports dedicated MoE configuration files for easier setup:
+
+```bash
+# File: configs/mixtral_8x2_bf16.moe
+# Naming: modelname_totalxactive_weighttype.moe
+
+op_name=matmul_id
+backend=zendnn
+m=14336
+n=512
+k=4096
+n_experts=8
+n_experts_used=2
+src_dtype=bf16
+wei_dtype=bf16
+routing_pattern=skewed
+routing_seed=42
+threads=8
+repeats=100
+warmup=20
+```
+
+Use `--moe-config` to load a complete MoE configuration from file:
+```bash
+./build/ops_ggml_benchmark --moe-config configs/mixtral_8x2_bf16.moe
 ```
 
 ### Layer-level benchmarks
@@ -306,7 +406,9 @@ Layer benchmarks support the same type compatibility rules as matmul operations:
 ./build/ops_ggml_benchmark --backend zendnn --op layer \
     --config configs/qwen2-7b.cfg --src_dtype f32 --wei_dtype f32 --threads 16
 
-# MoE models (GGML backend only)
+# MoE layer configs (GGML backend only - multi-op graphs)
+# Note: matmul_id operator itself is supported by both backends,
+# but full layer configs with mixed dense+MoE ops are GGML only
 ./build/ops_ggml_benchmark --backend ggml --op layer \
     --config configs/mixtral-8x7b.cfg --src_dtype f32 --wei_dtype q4_0 --threads 16
 
@@ -406,9 +508,9 @@ Results are displayed in a tabular format with per-iteration averages:
 
 ```
 Backend  M      N      K      Iters  Src_type        Wei_type        Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-ggml     2048   2048   2048   100    f32             f32             96       3.10           0.01              0.22              2.87          5993.75
-ggml     2048   2048   2048   100    bf16            bf16            96       2.05           0.01              0.23              1.81          9481.22
-ggml     2048   2048   2048   100    f32             q4_0            96       3.23           0.02              0.31              2.90          5924.14
+ggml     2048   2048   2048   100    f32             f32             8        29.66          0.23              0.22              29.21         588.12
+ggml     2048   2048   2048   100    bf16            bf16            8        12.79          0.01              0.26              12.52         1372.41
+ggml     2048   2048   2048   100    f32             q4_0            8        16.83          0.19              0.27              16.36         1049.96
 ```
 
 **Columns explained:**
@@ -434,87 +536,93 @@ One-time setup costs (context creation, graph building) are amortized across all
 - 100 iterations: Setup overhead is negligible
 - **Per-iteration average**: Directly comparable!
 
-Example: Both show ~2.87ms execution time:
+Example: Both show ~29.2ms execution time (F32+F32, 2048x2048x2048, 8 threads):
 ```
-5 iters:   Avg_exec=2.85ms
-100 iters: Avg_exec=2.87ms
+5 iters:   Avg_exec=29.18ms
+100 iters: Avg_exec=29.21ms
 ```
 
 ### Example Outputs
 
-#### Same Type vs Mixed Type Comparison (GGML backend, 2048x2048x2048, 96 threads):
+#### Same Type vs Mixed Type Comparison (GGML backend, 2048x2048x2048, 8 threads):
 
 ```bash
 # Same type: F32+F32
-./build/ops_ggml_benchmark --src_dtype f32 --wei_dtype f32 \
-  --m 2048 --n 2048 --k 2048 --threads 96 --repeats 100 --warmup 50
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --src_dtype f32 --wei_dtype f32 \
+  --m 2048 --n 2048 --k 2048 --threads 8 --repeats 100 --warmup 50
 
 # Same type: BF16+BF16 (fastest!)
-./build/ops_ggml_benchmark --src_dtype bf16 --wei_dtype bf16 \
-  --m 2048 --n 2048 --k 2048 --threads 96 --repeats 100 --warmup 50
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --src_dtype bf16 --wei_dtype bf16 \
+  --m 2048 --n 2048 --k 2048 --threads 8 --repeats 100 --warmup 50
 
 # Mixed type: F32 source + BF16 weights
-./build/ops_ggml_benchmark --src_dtype f32 --wei_dtype bf16 \
-  --m 2048 --n 2048 --k 2048 --threads 96 --repeats 100 --warmup 50
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --src_dtype f32 --wei_dtype bf16 \
+  --m 2048 --n 2048 --k 2048 --threads 8 --repeats 100 --warmup 50
 
 # Mixed type: F32 source + Q4_0 weights
-./build/ops_ggml_benchmark --src_dtype f32 --wei_dtype q4_0 \
-  --m 2048 --n 2048 --k 2048 --threads 96 --repeats 100 --warmup 50
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --src_dtype f32 --wei_dtype q4_0 \
+  --m 2048 --n 2048 --k 2048 --threads 8 --repeats 100 --warmup 50
 ```
 
 ```
 === Same Type: F32+F32 ===
 Backend  M      N      K      Iters  Src_type  Wei_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-ggml     2048   2048   2048   100    f32       f32       96       7.12           0.02              0.22              3.22          5331.60
+ggml     2048   2048   2048   100    f32       f32       8        29.66          0.23              0.22              29.21         588.12
 
 === Same Type: BF16+BF16 (FASTEST) ===
 Backend  M      N      K      Iters  Src_type  Wei_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-ggml     2048   2048   2048   100    bf16      bf16      96       6.11           0.02              0.26              1.65          10419.88
+ggml     2048   2048   2048   100    bf16      bf16      8        12.79          0.01              0.26              12.52         1372.41
 
 === Mixed Type: F32+BF16 ===
 Backend  M      N      K      Iters  Src_type  Wei_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-ggml     2048   2048   2048   100    f32       bf16      96       7.71           0.02              0.24              3.40          5058.19
+ggml     2048   2048   2048   100    f32       bf16      8        14.97          0.01              0.24              14.72         1167.26
 
 === Mixed Type: F32+Q4_0 (Quantized) ===
 Backend  M      N      K      Iters  Src_type  Wei_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-ggml     2048   2048   2048   100    f32       q4_0      96       3.16           0.17              0.33              2.65          6486.80
+ggml     2048   2048   2048   100    f32       q4_0      8        16.83          0.19              0.27              16.36         1049.96
 ```
 
 **Key Findings:**
-- **BF16+BF16 is ~2x faster than F32+F32** (1.65ms vs 3.22ms execution time)
-- Mixed types (F32 source with any weight type) have similar performance to F32+F32
+- **BF16+BF16 is ~2.3x faster than F32+F32** (12.52ms vs 29.21ms execution time)
+- Mixed types (F32 source with BF16/Q4_0 weights) are faster than F32+F32
 - Q4_0 quantized weights offer best memory efficiency with good performance
 
-#### Backend Comparison (4096x4096x4096, BF16+BF16, 16 threads):
+#### Backend Comparison (4096x4096x4096, BF16+BF16, 8 threads):
 
 ```bash
 # GGML backend with BF16
-./build/ops_ggml_benchmark --backend ggml --src_dtype bf16 --wei_dtype bf16 \
-  --m 4096 --n 4096 --k 4096 --threads 16 --repeats 50 --warmup 10
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --backend ggml --src_dtype bf16 --wei_dtype bf16 \
+  --m 4096 --n 4096 --k 4096 --threads 8 --repeats 50 --warmup 10
 
 # ZenDNN backend with BF16
-./build/ops_ggml_benchmark --backend zendnn --src_dtype bf16 --wei_dtype bf16 \
-  --m 4096 --n 4096 --k 4096 --threads 16 --repeats 50 --warmup 10
+numactl --physcpubind=0-7 --membind=0 \
+  ./build/ops_ggml_benchmark --backend zendnn --src_dtype bf16 --wei_dtype bf16 \
+  --m 4096 --n 4096 --k 4096 --threads 8 --repeats 50 --warmup 10
 ```
 
 ```
 === GGML BF16+BF16 ===
 Backend  M      N      K      Iters  Src_type  Wei_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-ggml     4096   4096   4096   50     bf16      bf16      16       62.73          0.02              1.87              60.84         2259.14
+ggml     4096   4096   4096   50     bf16      bf16      8        103.61         0.02              2.01              101.57        1353.10
 
 === ZenDNN BF16+BF16 ===
 Backend  M      N      K      Iters  Src_type  Wei_type  Threads  Avg_total(ms)  Avg_ctx_init(ms)  Avg_op_setup(ms)  Avg_exec(ms)  GFLOPS
-zendnn   4096   4096   4096   50     bf16      bf16      16       41.21          0.74              1.28              39.19         3507.00
+zendnn   4096   4096   4096   50     bf16      bf16      8        80.44          0.77              1.26              78.40         1752.97
 ```
 
-**Analysis**: ZenDNN is 1.55× faster than GGML (39.19ms vs 60.84ms execution time) for BF16 workloads.
+**Analysis**: ZenDNN is 1.30× faster than GGML (78.40ms vs 101.57ms execution time) for BF16 workloads.
 
 ## Backends
 
 | Backend | Description | Source Types | Weight Types | Operators | MoE Support | Quantization |
 |---------|-------------|--------------|--------------|-----------|-------------|--------------|
 | `ggml` | GGML CPU backend from llama.cpp | **f32, bf16** | **f32, f16, bf16, q8_0, q4_0** | matmul, matmul_id, layer | ✅ | ✅ q8_0, q4_0 |
-| `zendnn` | ZenDNN LoWoHA matmul API (AMD optimized) | **f32, bf16** | **f32, bf16** | matmul, layer (dense only) | ❌ | ❌ |
+| `zendnn` | ZenDNN LoWoHA matmul API (AMD optimized) | **f32, bf16** | **f32, bf16** | matmul, matmul_id, layer (dense only) | ✅ Group GEMM | ❌ |
 
 Use `--backend <ggml|zendnn>` to select the backend (default: ggml).
 
@@ -530,11 +638,14 @@ Use `--backend <ggml|zendnn>` to select the backend (default: ggml).
 - **ZenDNN backend does NOT support:**
   - f16 weight type (use f32 or bf16)
   - Quantized types (q8_0, q4_0) - GGML backend only
-  - `matmul_id` operator (MoE expert routing)
-  - MoE layer configs (mixtral, qwen3-coder)
+  - MoE layer configs (mixtral, qwen3-coder) - only dense layers supported
+- **ZenDNN backend DOES support:**
+  - `matmul_id` operator via Group GEMM implementation (gather + batched GEMM + scatter)
+  - Configurable routing patterns for matmul_id (uniform, custom, random, skewed)
 - **GGML backend supports all features:** All type combinations (with compatibility rules above)
-- For MoE models, always use GGML backend
+- For matmul_id benchmarks, both backends supported (GGML uses internal routing, ZenDNN uses Group GEMM)
 - For dense models, both backends supported
+- For full MoE layer configs, use GGML backend
 
 ## Benchmark approach
 

@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include <string>
+#include <vector>
 
 // Operator descriptor -- mirrors benchdnn problem descriptors.
 // Carries the shape, data type, and execution parameters for a single
@@ -24,4 +25,13 @@ struct OpDesc {
     // matmul_id specific
     int         n_experts    = 1;   // total expert count (default: 1 for simplicity)
     int         n_experts_used = 1; // experts selected per token (default: 1)
+
+    // matmul_id routing configuration
+    std::string routing_pattern = "uniform";      // "uniform", "custom", "random", "skewed"
+    std::vector<int> expert_token_counts;         // explicit per-expert counts: [24, 30, 15, ...]
+    int         routing_seed = 42;                // for reproducible random routing
+    std::string routing_ids_file;                 // optional: load pre-generated routing
+
+    // Verification mode
+    bool        verify_output = false;            // save output data for comparison
 };

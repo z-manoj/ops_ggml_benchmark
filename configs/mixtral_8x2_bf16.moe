@@ -1,0 +1,36 @@
+# MoE Configuration: Mixtral-8x7B FFN Expert Layer
+# Format: key=value pairs
+# Realistic production workload - Mixtral FFN dimensions
+
+# Operation and backend
+op_name=matmul_id
+backend=zendnn
+
+# Dimensions (Mixtral FFN: 14336 intermediate, 4096 model dim)
+m=14336
+n=512
+k=4096
+
+# MoE parameters
+n_experts=8
+n_experts_used=2
+
+# Data types
+src_dtype=bf16
+wei_dtype=bf16
+
+# Routing configuration
+routing_pattern=skewed
+routing_seed=42
+# For custom routing, uncomment and specify per-expert token counts:
+# routing_pattern=custom
+# expert_token_counts=126,323,80,68,256,37,15,119
+# Note: Sum must equal n * n_experts_used (e.g., 512 * 2 = 1024)
+
+# Performance testing
+threads=8
+repeats=100
+warmup=20
+
+# Description
+description=Mixtral-8x7B FFN gate/up projection - 8 experts, 2 active, skewed routing

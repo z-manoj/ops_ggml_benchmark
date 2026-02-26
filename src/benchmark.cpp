@@ -19,8 +19,7 @@ BenchResult run_benchmark(const OpDesc& desc) {
         if (desc.op_name == "matmul") {
             return bench_matmul_zendnn(desc);
         } else if (desc.op_name == "matmul_id") {
-            fprintf(stderr, "error: matmul_id not yet implemented for ZenDNN backend\n");
-            exit(1);
+            return bench_matmul_id_zendnn(desc);
         } else {
             fprintf(stderr, "error: unknown operator '%s'\n", desc.op_name.c_str());
             exit(1);
@@ -52,7 +51,14 @@ void print_results(const OpDesc& desc, const BenchResult& result) {
            "Avg_total(ms)", "Avg_ctx_init(ms)", "Avg_op_setup(ms)", "Avg_exec(ms)", "GFLOPS");
 
     // Calculate GFLOPS
-    double flops = 2.0 * desc.m * desc.n * desc.k;
+    double flops;
+    if (desc.op_name == "matmul_id") {
+        // For matmul_id: FLOPs = 2 * M * K * n_experts_used * N
+        flops = 2.0 * desc.m * desc.k * desc.n_experts_used * desc.n;
+    } else {
+        // For regular matmul: FLOPs = 2 * M * N * K
+        flops = 2.0 * desc.m * desc.n * desc.k;
+    }
     double gflops = flops / (result.avg_ms * 1e-3) / 1e9;
 
     // Amortize one-time costs across all iterations for fair comparison
@@ -96,7 +102,14 @@ void write_csv_results(const std::string& csv_path, const OpDesc& desc,
     }
 
     // Calculate metrics - amortize one-time costs for fair comparison
-    double flops = 2.0 * desc.m * desc.n * desc.k;
+    double flops;
+    if (desc.op_name == "matmul_id") {
+        // For matmul_id: FLOPs = 2 * M * K * n_experts_used * N
+        flops = 2.0 * desc.m * desc.k * desc.n_experts_used * desc.n;
+    } else {
+        // For regular matmul: FLOPs = 2 * M * N * K
+        flops = 2.0 * desc.m * desc.n * desc.k;
+    }
     double gflops = flops / (result.avg_ms * 1e-3) / 1e9;
 
     double avg_ctx_per_iter = result.ctx_creation_ms / desc.repeats;
