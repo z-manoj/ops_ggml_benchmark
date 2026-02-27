@@ -110,8 +110,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
 
     // 6. Fill inputs with deterministic data
     // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
-    fill_tensor_deterministic(a, 42, using_repack);
-    fill_tensor_deterministic(b, 137, false);  // b is always F32, no repack needed
+    fill_tensor_deterministic(a, desc.data_seed, using_repack);
+    fill_tensor_deterministic(b, desc.data_seed + 95, false);  // b is always F32, no repack needed
     auto t_op_end = std::chrono::steady_clock::now();
     double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
@@ -267,8 +267,8 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
 
     // Fill expert weights and input
     // Use backend_set for repack buffer to trigger q4_0 → q4_0x8 conversion
-    fill_tensor_deterministic(as, 42, using_repack);
-    fill_tensor_deterministic(b, 137, false);  // b is always F32, no repack needed
+    fill_tensor_deterministic(as, desc.data_seed, using_repack);
+    fill_tensor_deterministic(b, desc.data_seed + 95, false);  // b is always F32, no repack needed
 
     // Generate routing ids using shared routing utilities
     std::vector<int32_t> routing_ids = generate_routing_ids(

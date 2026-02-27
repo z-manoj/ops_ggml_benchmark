@@ -5,6 +5,7 @@
 #include "layer_bench.h"
 #include "moe_config.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -122,6 +123,8 @@ static void print_usage(const char* prog) {
         "                            e.g., 24,30,15,20,18,22,25,26\n"
         "  --routing_seed <int>      Seed for random/skewed routing (default: 42)\n"
         "  --routing_ids_file <file> Load pre-generated routing IDs from file\n"
+        "  --seed <int>              Seed for input/weight data generation (default: 42)\n"
+        "                            Use different seeds to test with different random data\n"
         "  --help                    Show this message\n",
         prog);
 }
@@ -197,6 +200,7 @@ int main(int argc, char** argv) {
         else if (arg("--routing_pattern")) { base.routing_pattern = next(); }
         else if (arg("--routing_seed")) { base.routing_seed = atoi(next()); }
         else if (arg("--routing_ids_file")) { base.routing_ids_file = next(); }
+        else if (arg("--seed")) { base.data_seed = atoi(next()); }
         else if (arg("--expert_token_counts")) {
             std::string counts_str = next();
             // Parse comma-separated: "24,30,15,20,18,22,25,26"
@@ -413,55 +417,165 @@ int main(int argc, char** argv) {
             }
 
             size_t n = ggml_result.output_data.size();
-            double max_rel_diff = 0.0;
-            double avg_rel_diff = 0.0;
-            size_t num_mismatches = 0;
-            // Relative tolerance based on data type: BF16 has only 7-bit mantissa
-            // Accumulation errors in large matmuls can compound
-            const double rel_tolerance = (desc.src_dtype == GGML_TYPE_BF16 || desc.wei_dtype == GGML_TYPE_BF16)
-                                         ? 0.05  // 5% for BF16 (acceptable rounding + accumulation error)
-                                         : 1e-4; // 0.01% for F32
+
+            // Calculate NRMSE (Normalized Root Mean Square Error)
+            // NRMSE = RMS(difference) / RMS(reference)
+            // where RMS(x) = sqrt(mean(x^2))
+
+            double sum_squared_diff = 0.0;
+            double sum_squared_ref = 0.0;
+            double max_abs_diff = 0.0;
+            double sum_abs_diff = 0.0;
+
+            // Find global min/max for display purposes
+            double global_min = std::numeric_limits<double>::max();
+            double global_max = std::numeric_limits<double>::lowest();
 
             for (size_t j = 0; j < n; j++) {
-                double abs_diff = std::abs(ggml_result.output_data[j] - zendnn_result.output_data[j]);
-                double magnitude = std::max(std::abs(ggml_result.output_data[j]), std::abs(zendnn_result.output_data[j]));
-                double rel_diff = (magnitude > 1e-6) ? (abs_diff / magnitude) : abs_diff;
+                double ggml_val = static_cast<double>(ggml_result.output_data[j]);
+                double zendnn_val = static_cast<double>(zendnn_result.output_data[j]);
 
-                avg_rel_diff += rel_diff;
-                if (rel_diff > max_rel_diff) max_rel_diff = rel_diff;
-                if (rel_diff > rel_tolerance) num_mismatches++;
+                // Update global min/max
+                global_min = std::min(global_min, std::min(ggml_val, zendnn_val));
+                global_max = std::max(global_max, std::max(ggml_val, zendnn_val));
+
+                // Calculate differences
+                double diff = ggml_val - zendnn_val;
+                double abs_diff = std::abs(diff);
+
+                // Accumulate for NRMSE
+                sum_squared_diff += diff * diff;
+                sum_squared_ref += ggml_val * ggml_val;
+
+                // Track statistics
+                sum_abs_diff += abs_diff;
+                if (abs_diff > max_abs_diff) {
+                    max_abs_diff = abs_diff;
+                }
             }
-            avg_rel_diff /= n;
+
+            // Calculate NRMSE
+            double rms_diff = std::sqrt(sum_squared_diff / n);
+            double rms_ref = std::sqrt(sum_squared_ref / n);
+            double nrmse = (rms_ref > 1e-10) ? (rms_diff / rms_ref) : 0.0;
+
+            // Calculate average
+            double avg_abs_diff = sum_abs_diff / n;
+
+            // NRMSE tolerance based on data type
+            // NRMSE is already a normalized global metric, so tolerances are very strict:
+            // For float32: 0.001% (1e-5) - numerical precision for identical implementations
+            // For bf16: 0.01% (1e-4) - acceptable due to reduced precision (7-bit mantissa)
+            const double nrmse_tolerance = (desc.src_dtype == GGML_TYPE_BF16 || desc.wei_dtype == GGML_TYPE_BF16)
+                                           ? 0.0001   // 0.01% for BF16
+                                           : 0.00001; // 0.001% for FP32
+
+            bool pass = (nrmse < nrmse_tolerance);
 
             printf("\n========================================================================\n");
             printf("VERIFICATION RESULTS:\n");
             printf("========================================================================\n");
-            printf("Total elements:     %zu\n", n);
-            printf("Max rel difference: %.6f%% \n", max_rel_diff * 100);
-            printf("Avg rel difference: %.6f%%\n", avg_rel_diff * 100);
-            printf("Rel tolerance:      %.6f%%\n", rel_tolerance * 100);
-            printf("Mismatches:         %zu (%.2f%%)\n", num_mismatches, 100.0 * num_mismatches / n);
+            printf("Total elements:           %zu\n", n);
+            printf("Output range:             [%.6f, %.6f]\n", global_min, global_max);
+            printf("\nVerification method:      NRMSE (Normalized Root Mean Square Error)\n");
+            printf("  NRMSE = RMS(diff) / RMS(reference)\n");
+            printf("  where RMS = sqrt(mean(squared_values))\n");
+            printf("\nNRMSE:                    %.6f%% %s\n", nrmse * 100, pass ? "(PASS)" : "(FAIL)");
+            printf("NRMSE tolerance:          %.6f%%\n", nrmse_tolerance * 100);
+            printf("\nDetailed statistics:\n");
+            printf("  RMS of differences:     %.9f\n", rms_diff);
+            printf("  RMS of reference:       %.9f\n", rms_ref);
+            printf("  Max abs difference:     %.9f\n", max_abs_diff);
+            printf("  Avg abs difference:     %.9f\n", avg_abs_diff);
 
-            if (num_mismatches == 0) {
-                printf("\n✓ PASS: Outputs match within tolerance!\n");
+            // Print 3x3 submatrix from top-left corner [0,0] for visual inspection
+            int rows = desc.n;  // Number of rows in output matrix
+            int cols = desc.m;  // Number of columns in output matrix
+
+            // Determine actual submatrix size (up to 3x3)
+            int print_rows = std::min(3, rows);
+            int print_cols = std::min(3, cols);
+            bool has_more_cols = (cols > print_cols);
+            bool has_more_rows = (rows > print_rows);
+
+            printf("\nSample output values (showing %dx%d submatrix from [0,0]):\n",
+                   print_rows, print_cols);
+            printf("\nGGML Backend:\n");
+            for (int r = 0; r < print_rows; r++) {
+                printf("  [");
+                for (int c = 0; c < print_cols; c++) {
+                    size_t idx = r * cols + c;
+                    printf("%11.6f", ggml_result.output_data[idx]);
+                    if (c < print_cols - 1) printf(", ");
+                }
+                if (has_more_cols) printf(", ...");
+                printf("]\n");
+            }
+            if (has_more_rows) printf("  ...\n");
+
+            printf("\nZenDNN Backend:\n");
+            for (int r = 0; r < print_rows; r++) {
+                printf("  [");
+                for (int c = 0; c < print_cols; c++) {
+                    size_t idx = r * cols + c;
+                    printf("%11.6f", zendnn_result.output_data[idx]);
+                    if (c < print_cols - 1) printf(", ");
+                }
+                if (has_more_cols) printf(", ...");
+                printf("]\n");
+            }
+            if (has_more_rows) printf("  ...\n");
+
+            printf("\nElement-wise Absolute Differences:\n");
+            for (int r = 0; r < print_rows; r++) {
+                printf("  [");
+                for (int c = 0; c < print_cols; c++) {
+                    size_t idx = r * cols + c;
+                    double diff = std::abs(ggml_result.output_data[idx] - zendnn_result.output_data[idx]);
+                    printf("%11.9f", diff);
+                    if (c < print_cols - 1) printf(", ");
+                }
+                if (has_more_cols) printf(", ...");
+                printf("]\n");
+            }
+            if (has_more_rows) printf("  ...\n");
+            printf("\n");
+
+            if (pass) {
+                printf("\n✓ PASS: NRMSE (%.6f%%) is below tolerance (%.6f%%)\n", nrmse * 100, nrmse_tolerance * 100);
+                printf("        Backends are functionally identical for float32 precision.\n");
             } else {
-                printf("\n✗ FAIL: %zu elements exceed relative tolerance\n", num_mismatches);
-                // Print first few mismatches
-                size_t printed = 0;
-                for (size_t j = 0; j < n && printed < 10; j++) {
-                    double abs_diff = std::abs(ggml_result.output_data[j] - zendnn_result.output_data[j]);
-                    double magnitude = std::max(std::abs(ggml_result.output_data[j]), std::abs(zendnn_result.output_data[j]));
-                    double rel_diff = (magnitude > 1e-6) ? (abs_diff / magnitude) : abs_diff;
+                printf("\n✗ FAIL: NRMSE (%.6f%%) exceeds tolerance (%.6f%%)\n", nrmse * 100, nrmse_tolerance * 100);
 
-                    if (rel_diff > rel_tolerance) {
-                        printf("  [%zu]: GGML=%.6f, ZenDNN=%.6f, rel_diff=%.2f%%\n",
-                               j, ggml_result.output_data[j], zendnn_result.output_data[j], rel_diff * 100);
-                        printed++;
-                    }
+                // Print elements with largest absolute differences for debugging
+                printf("\nTop 10 elements with largest absolute differences:\n");
+
+                // Create a vector of indices sorted by absolute difference
+                std::vector<std::pair<double, size_t>> diff_indices;
+                for (size_t j = 0; j < n; j++) {
+                    double ggml_val = static_cast<double>(ggml_result.output_data[j]);
+                    double zendnn_val = static_cast<double>(zendnn_result.output_data[j]);
+                    double abs_diff = std::abs(ggml_val - zendnn_val);
+                    diff_indices.push_back({abs_diff, j});
                 }
-                if (num_mismatches > 10) {
-                    printf("  ... (%zu more mismatches)\n", num_mismatches - 10);
+
+                // Partial sort to get top 10
+                size_t num_to_print = std::min(size_t(10), n);
+                std::partial_sort(diff_indices.begin(),
+                                 diff_indices.begin() + num_to_print,
+                                 diff_indices.end(),
+                                 std::greater<std::pair<double, size_t>>());
+
+                for (size_t i = 0; i < num_to_print; i++) {
+                    size_t j = diff_indices[i].second;
+                    double ggml_val = static_cast<double>(ggml_result.output_data[j]);
+                    double zendnn_val = static_cast<double>(zendnn_result.output_data[j]);
+                    double abs_diff = std::abs(ggml_val - zendnn_val);
+
+                    printf("  [%zu]: GGML=%.9f, ZenDNN=%.9f, abs_diff=%.9f\n",
+                           j, ggml_val, zendnn_val, abs_diff);
                 }
+
                 return 1;
             }
             printf("========================================================================\n");

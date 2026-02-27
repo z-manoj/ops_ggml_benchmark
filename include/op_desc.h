@@ -32,6 +32,9 @@ struct OpDesc {
     int         routing_seed = 42;                // for reproducible random routing
     std::string routing_ids_file;                 // optional: load pre-generated routing
 
+    // Data generation seed
+    int         data_seed = 42;                   // seed for input/weight data generation
+
     // Verification mode
     bool        verify_output = false;            // save output data for comparison
 };

@@ -50,24 +50,32 @@ static void fill_buffer(T* data, size_t n, uint32_t seed) {
     }
 }
 
-// Specialization for bf16
+// Specialization for bf16 (matches GGML's ggml_compute_fp32_to_bf16 with rounding)
 static void fill_buffer_bf16(void* data, size_t n, uint32_t seed) {
     uint16_t* ptr = reinterpret_cast<uint16_t*>(data);
     uint32_t state = seed;
     for (size_t i = 0; i < n; i++) {
         uint32_t r = xorshift32(state);
         float val = static_cast<float>(static_cast<int32_t>(r)) / static_cast<float>(INT32_MAX);
-        // BF16 is just top 16 bits of float32
-        ptr[i] = static_cast<uint16_t>(*reinterpret_cast<uint32_t*>(&val) >> 16);
+        uint32_t u = *reinterpret_cast<uint32_t*>(&val);
+
+        // Match GGML's fp32_to_bf16 conversion with round-to-nearest-even
+        if ((u & 0x7fffffff) > 0x7f800000) { // NaN
+            ptr[i] = (u >> 16) | 64; // force to quiet NaN
+        } else {
+            // Round to nearest even: add 0x7fff plus LSB of result for tie-breaking
+            ptr[i] = static_cast<uint16_t>((u + (0x7fff + ((u >> 16) & 1))) >> 16);
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // ZenDNN matmul benchmark
 //
-// ZenDNN LoWoHA matmul: C(M,N) = A(M,K) * B(K,N)
-// To match GGML semantics where weights are [K, N] (column-major),
-// we transpose: C(N,M) = A(N,K) * B(K,M)
+// Formula: C(N,M) = A(N,K) × B_t(K,M) where N=tokens, M=features
+// Following matmul_id pattern: output[N,M] = input[N,K] × weights[K,M]
+// Weights stored as [M,K] and transposed by ZenDNN to [K,M]
+// Memory: weights[M,K], input[N,K], output[N,M]
 // FLOPs = 2 * M * N * K
 // ---------------------------------------------------------------------------
 BenchResult bench_matmul_zendnn(const OpDesc& desc) {
@@ -85,10 +93,12 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     auto t_ctx_start = std::chrono::steady_clock::now();
 
     // 1. Allocate memory for matrices
-    // To match GGML: A:[N,K] (weights), B:[K,M] (input), C:[N,M] (output)
-    size_t a_size = N * K;
-    size_t b_size = K * M;
-    size_t c_size = N * M;
+    // Following matmul_id pattern: output[N,M] = input[N,K] × weights[K,M]
+    // Where N = desc.n (tokens), M = desc.m (features), K = desc.k
+    // Weights stored as [M,K] and transposed, so allocate M*K
+    size_t a_size = M * K;  // weights: [M, K] will be transposed
+    size_t b_size = N * K;  // input: [N, K]
+    size_t c_size = N * M;  // output: [N, M]
 
     std::vector<char> a_data, b_data, c_data;
 
@@ -108,18 +118,18 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     void* b_ptr = b_data.data();
     void* c_ptr = c_data.data();
 
-    // Fill weights (a)
+    // Fill weights (a) - use data_seed for weights
     if (wei_dt == zendnnl::common::data_type_t::f32) {
-        fill_buffer(reinterpret_cast<float*>(a_ptr), a_size, 42);
+        fill_buffer(reinterpret_cast<float*>(a_ptr), a_size, desc.data_seed);
     } else if (wei_dt == zendnnl::common::data_type_t::bf16) {
-        fill_buffer_bf16(a_ptr, a_size, 42);
+        fill_buffer_bf16(a_ptr, a_size, desc.data_seed);
     }
 
-    // Fill source/input (b)
+    // Fill source/input (b) - use data_seed + 95 for inputs (to get different values than weights)
     if (src_dt == zendnnl::common::data_type_t::f32) {
-        fill_buffer(reinterpret_cast<float*>(b_ptr), b_size, 137);
+        fill_buffer(reinterpret_cast<float*>(b_ptr), b_size, desc.data_seed + 95);
     } else if (src_dt == zendnnl::common::data_type_t::bf16) {
-        fill_buffer_bf16(b_ptr, b_size, 137);
+        fill_buffer_bf16(b_ptr, b_size, desc.data_seed + 95);
     }
 
     // 3. Setup ZenDNN matmul parameters
@@ -141,23 +151,25 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     double op_creation_ms = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
     // 4. Warmup
+    // Following matmul_id pattern: output[N,M] = input[N,K] × weights[K,M]
+    // Weights stored as [M,K], transposed inside ZenDNN
     for (int i = 0; i < desc.warmup; i++) {
         status_t status = matmul_direct(
             'r',                      // row-major
-            false,                    // don't transpose src
-            true,                     // transpose weights
-            M,                        // M: rows of B and C
-            N,                        // N: cols of A^T and C
-            K,                        // K: cols of B, rows of A
+            false,                    // don't transpose input
+            true,                     // transpose weights [M,K] -> [K,M]
+            N,                        // M: rows of input and output (tokens)
+            M,                        // N: cols of output (features)
+            K,                        // K: inner dimension
             1.0f,                     // alpha
-            b_ptr,                    // src: B[M, K]
-            K,                        // lda
-            a_ptr,                    // weights: A[N, K] (will be transposed)
-            K,                        // ldb
+            b_ptr,                    // src: input[N, K]
+            K,                        // lda: leading dim of input
+            a_ptr,                    // weights: [M, K] (will be transposed)
+            K,                        // ldb: leading dim of weights
             nullptr,                  // bias
             0.0f,                     // beta
-            c_ptr,                    // output C[M, N]
-            N,                        // ldc
+            c_ptr,                    // output: [N, M]
+            M,                        // ldc: leading dim of output
             true,                     // is_weights_const
             batch_params,
             params
@@ -180,13 +192,13 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
 
         status_t status = matmul_direct(
             'r', false, true,
-            M, N, K,
+            N, M, K,
             1.0f,
             b_ptr, K,
             a_ptr, K,
             nullptr,
             0.0f,
-            c_ptr, N,
+            c_ptr, M,
             true,
             batch_params,
             params
@@ -224,7 +236,7 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
 
     // Copy output for verification if requested
     if (desc.verify_output) {
-        size_t output_size = N * M;  // Output: [M, N] -> [N, M] transposed
+        size_t output_size = N * M;  // Output: [N, M] where N=tokens, M=features
         result.output_data.resize(output_size);
         const float* output_f32 = reinterpret_cast<const float*>(c_ptr);
         std::copy(output_f32, output_f32 + output_size, result.output_data.begin());
@@ -283,18 +295,18 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc) {
     void* input_ptr = input_data.data();
     void* output_ptr = output_data.data();
 
-    // Fill expert weights
+    // Fill expert weights - use data_seed for weights
     if (wei_dt == zendnnl::common::data_type_t::f32) {
-        fill_buffer(reinterpret_cast<float*>(expert_ptr), expert_size * n_exp, 42);
+        fill_buffer(reinterpret_cast<float*>(expert_ptr), expert_size * n_exp, desc.data_seed);
     } else if (wei_dt == zendnnl::common::data_type_t::bf16) {
-        fill_buffer_bf16(expert_ptr, expert_size * n_exp, 42);
+        fill_buffer_bf16(expert_ptr, expert_size * n_exp, desc.data_seed);
     }
 
-    // Fill input
+    // Fill input - use data_seed + 95 for inputs (to get different values than weights)
     if (src_dt == zendnnl::common::data_type_t::f32) {
-        fill_buffer(reinterpret_cast<float*>(input_ptr), input_size, 137);
+        fill_buffer(reinterpret_cast<float*>(input_ptr), input_size, desc.data_seed + 95);
     } else if (src_dt == zendnnl::common::data_type_t::bf16) {
-        fill_buffer_bf16(input_ptr, input_size, 137);
+        fill_buffer_bf16(input_ptr, input_size, desc.data_seed + 95);
     }
 
     // Generate routing ids using shared routing utilities (identical to GGML)
