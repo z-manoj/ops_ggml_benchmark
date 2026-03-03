@@ -1,7 +1,10 @@
-build/
+build*/
 .cache/
 cmake-build-*/
 .idea/
 *.swp
 *.csv
-*.sh
+build/
+
+results/
+results/*
