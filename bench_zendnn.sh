@@ -2,7 +2,7 @@
 export ZENDNNL_MATMUL_ALGO=1
 
 BINARY=./build_zendnn/ops_ggml_benchmark
-OUTDIR=results/bench1/zendnn_bf16_to_bf16
+OUTDIR=results/bench/zendnn_bf16_to_bf16
 mkdir -p "$OUTDIR"
 
 CONFIGS=(
@@ -59,18 +59,18 @@ for cfg in "${CONFIGS[@]}"; do
                     K="${MM_KS[$i]}"
 
                     count=$((count + 1))
-                    echo "[${count}/${total}] model=${model_name} op=${label} N=${N} K=${K} M=${m} wei=${wei} threads=${t}"
+                    echo "[${count}/${total}] model=${model_name} op=${label} M=${N} K=${K} N=${m} wei=${wei} threads=${t}"
 
                     # Capture output of binary
                     raw_output=$(numactl --physcpubind="${cpubind}" --membind="${membind}" \
                         $BINARY \
                             --backend zendnn \
                             --op matmul \
-                            --n      "$N" \
+                            --n      "$m" \
                             --k      "$K" \
                             --src_dtype bf16 \
                             --wei_dtype "$wei" \
-                            --m "$m" \
+                            --m "$N" \
                             --threads "$t" \
                             --warmup 100 \
                             --repeats 100 \
