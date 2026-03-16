@@ -109,7 +109,7 @@ static void print_usage(const char* prog) {
         "                            q8_0/q4_0: quantized weights (ggml only)\n"
         "  --dtype <f32|f16|bf16|q8_0|q4_0>\n"
         "                            Set both src and wei dtypes (deprecated)\n"
-        "  --backend <ggml|zendnn>   Backend to use (default: ggml)\n"
+        "  --backend <ggml|zendnn|approach4> Backend to use (default: ggml)\n"
         "  --threads <int>           Thread count (default: hw concurrency)\n"
         "  --repeats <int>           Timed iterations (default: 100)\n"
         "  --warmup <int>            Warmup iterations (default: 10)\n"
@@ -228,8 +228,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (base.backend != "ggml" && base.backend != "zendnn") {
-        fprintf(stderr, "error: unknown backend '%s' (must be 'ggml' or 'zendnn')\n", base.backend.c_str());
+    if (base.backend != "ggml" && base.backend != "zendnn" && base.backend != "approach4") {
+        fprintf(stderr, "error: unknown backend '%s' (must be 'ggml', 'zendnn', or 'approach4')\n", base.backend.c_str());
         return 1;
     }
 
@@ -239,10 +239,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Validate dtypes for ZenDNN backend
-    if (base.backend == "zendnn") {
+    // Validate dtypes for ZenDNN and approach4 backend
+    if (base.backend == "zendnn" || base.backend == "approach4") {
         if (base.wei_dtype == GGML_TYPE_F16) {
-            fprintf(stderr, "error: ZenDNN backend does not support f16 weights (only f32 and bf16 supported)\n");
+            fprintf(stderr, "error: ZenDNN/approach4 backend does not support f16 weights (only f32 and bf16 supported)\n");
             return 1;
         }
     }
@@ -326,6 +326,11 @@ int main(int argc, char** argv) {
         LayerConfig cfg = parse_layer_config(config_file);
         LayerBenchResult result;
 
+        if (base.backend == "approach4") {
+            fprintf(stderr, "error: approach4 backend does not support layer mode natively yet\n");
+            return 1;
+        }
+
         if (base.backend == "zendnn") {
 #ifdef ENABLE_ZENDNN
             result = bench_layer_zendnn(cfg, base.wei_dtype, base.threads,
@@ -388,8 +393,9 @@ int main(int argc, char** argv) {
 
         // Verification mode: run both backends and compare outputs
         if (desc.verify_output) {
+            std::string compare_backend = (base.backend == "ggml") ? "zendnn" : base.backend;
             printf("========================================================================\n");
-            printf("VERIFICATION MODE: Comparing GGML vs ZenDNN outputs\n");
+            printf("VERIFICATION MODE: Comparing GGML vs %s outputs\n", compare_backend.c_str());
             printf("========================================================================\n\n");
 
             // Run GGML
@@ -398,10 +404,10 @@ int main(int argc, char** argv) {
             printf("GGML:   ");
             print_results(desc, ggml_result);
 
-            // Run ZenDNN
-            desc.backend = "zendnn";
+            // Run Compare Backend
+            desc.backend = compare_backend;
             BenchResult zendnn_result = run_benchmark(desc);
-            printf("ZenDNN: ");
+            printf("%s: ", compare_backend.c_str());
             print_results(desc, zendnn_result);
 
             // Compare outputs

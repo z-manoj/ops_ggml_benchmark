@@ -1,5 +1,4 @@
 #pragma once
-
 #include "op_desc.h"
 #include <string>
 #include <vector>
@@ -29,4 +28,5 @@ BenchResult run_benchmark(const OpDesc& desc);
 void print_results(const OpDesc& desc, const BenchResult& result);
 
 // Write results to CSV file (ZenDNN benchdnn format).
-void write_csv_results(const std::string& csv_path, const OpDesc& desc, const BenchResult& result, bool write_header);
+void write_csv_results(const std::string& csv_path, const OpDesc& desc,
+                       const BenchResult& result, bool write_header);

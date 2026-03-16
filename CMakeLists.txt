@@ -33,6 +33,7 @@ if (ENABLE_ZENDNN)
     list(APPEND BENCHMARK_SOURCES
         src/zendnn_matmul_bench.cpp
         src/layer_bench_zendnn.cpp
+        src/approach4.cpp
     )
 endif()
 
@@ -40,6 +41,7 @@ add_executable(ops_ggml_benchmark ${BENCHMARK_SOURCES})
 
 target_include_directories(ops_ggml_benchmark PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${llama_cpp_SOURCE_DIR}/ggml/src
 )
 
 # Link against GGML library targets provided by llama.cpp
