@@ -1,4 +1,5 @@
 #include "ggml_matmul_bench.h"
+#include "cache_utils.h"
 #include "ggml_utils.h"
 #include "routing_utils.h"
 #include "ggml.h"
@@ -126,6 +127,9 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     double sum_ms = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
+#if COLD_CACHE
+        flush_cache(desc.cache_size);
+#endif
         auto t0 = std::chrono::steady_clock::now();
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();
@@ -292,6 +296,9 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     double sum_ms = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
+#if COLD_CACHE
+        flush_cache(desc.cache_size);
+#endif
         auto t0 = std::chrono::steady_clock::now();
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();

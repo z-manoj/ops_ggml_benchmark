@@ -1,6 +1,7 @@
 #ifdef ENABLE_ZENDNN
 
 #include "layer_bench.h"
+#include "cache_utils.h"
 #include "ggml_utils.h"
 #include "zendnnl.hpp"
 
@@ -73,7 +74,8 @@ static size_t estimate_weight_bytes_zendnn(const LayerConfig& cfg, ggml_type dty
 LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
                                     ggml_type wei_dtype, int threads,
                                     int warmup, int repeats,
-                                    ggml_type src_dtype) {
+                                    ggml_type src_dtype,
+                                    size_t cache_size) {
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
 
@@ -223,11 +225,15 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
     std::vector<std::vector<double>> op_times(ops.size());
 
     for (int r = 0; r < repeats; r++) {
-        auto iter_t0 = std::chrono::steady_clock::now();
+        double iter_ms = 0.0;
 
         // Execute and time each operation individually
         for (size_t i = 0; i < ops.size(); i++) {
             auto& op = ops[i];
+
+#if COLD_CACHE
+            flush_cache(cache_size);
+#endif
 
             auto op_t0 = std::chrono::steady_clock::now();
 
@@ -254,10 +260,9 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
 
             double op_ms = std::chrono::duration<double, std::milli>(op_t1 - op_t0).count();
             op_times[i].push_back(op_ms);
+            iter_ms += op_ms;
         }
 
-        auto iter_t1 = std::chrono::steady_clock::now();
-        double iter_ms = std::chrono::duration<double, std::milli>(iter_t1 - iter_t0).count();
         total_min_ms = std::min(total_min_ms, iter_ms);
         total_max_ms = std::max(total_max_ms, iter_ms);
         total_sum_ms += iter_ms;

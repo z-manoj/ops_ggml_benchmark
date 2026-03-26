@@ -37,4 +37,7 @@ struct OpDesc {
 
     // Verification mode
     bool        verify_output = false;            // save output data for comparison
+
+    // Cold cache size
+    size_t      cache_size = 0;
 };
