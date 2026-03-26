@@ -47,6 +47,7 @@ All compute is performed by existing GGML CPU kernels and ZenDNN primitives.
 | **MoE Support**      | ✅ matmul_id, MoE layers | ✅ matmul_id via Group GEMM |
 | **Batched Matmul**   | ✅ Via shape dimensions | ✅ Via shape dimensions |
 | **Warmup Iterations**| ✅ Configurable | ✅ Configurable |
+| **Cold Cache**       | ✅ Supported | ✅ Supported |
 
 ### Data Type Details
 
@@ -205,6 +206,30 @@ The benchmark supports multiple routing patterns for realistic MoE load testing:
 - **Debugging**: Verify backend behavior with specific expert distributions
 
 **Implementation:** Both backends call `generate_routing_ids()` with identical parameters, ensuring apple-to-apple comparison.
+
+## Cold Cache Support
+
+To simulate realistic memory access patterns and prevent artificially inflated performance numbers due to warm CPU caches, this benchmark includes an optional cold cache feature. When enabled, it aggressively flushes the CPU caches before operations.
+
+### How it works:
+- **Single Ops (`matmul`, `matmul_id`)**: The cache is flushed before each timed repetition.
+- **ZenDNN Layer Benchmarks**: The cache is flushed before *every individual operation* within the layer, giving true cold-start latency for each node.
+- **GGML Layer Benchmarks**: The cache is flushed exactly once before the entire layer execution, as GGML evaluates the entire graph array in a single backend API call.
+- **Timing Accuracy**: The overhead of the cache flush itself is strictly excluded from execution time measurements.
+
+### How to enable and use:
+
+The feature is controlled via a CMake flag during the build process.
+
+1. **Build with Cold Cache enabled**:
+   ```bash
+   # Add -DENABLE_COLD_CACHE=ON to your CMake configuration
+   cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_COLD_CACHE=ON
+   cmake --build build -j$(nproc)
+   ```
+
+2. **Run benchmarks normally**:
+   When compiled with `-DENABLE_COLD_CACHE=ON`, the benchmark executable will automatically detect your system's cache sizes (by reading `/sys/devices/system/cpu/cpu0/cache`) and flush them before taking time measurements. No additional command-line flags are needed at runtime.
 
 ## How to build
 
