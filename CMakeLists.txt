@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Build options
 # ---------------------------------------------------------------------------
 option(ENABLE_ZENDNN "Enable ZenDNN backend support" OFF)
+option(ENABLE_COLD_CACHE "Enable cold cache support (simulates realistic memory access)" OFF)
 
 # ---------------------------------------------------------------------------
 # Fetch llama.cpp (GGML only)
@@ -27,7 +28,10 @@ set(BENCHMARK_SOURCES
     src/moe_config.cpp
     src/layer_bench.cpp
     src/layer_bench_ggml.cpp
+    src/cache_utils.cpp
 )
+
+find_package(OpenMP REQUIRED)
 
 if (ENABLE_ZENDNN)
     list(APPEND BENCHMARK_SOURCES
@@ -37,6 +41,14 @@ if (ENABLE_ZENDNN)
 endif()
 
 add_executable(ops_ggml_benchmark ${BENCHMARK_SOURCES})
+
+target_compile_options(ops_ggml_benchmark PRIVATE -msse2 ${OpenMP_CXX_FLAGS})
+target_link_options(ops_ggml_benchmark PRIVATE ${OpenMP_CXX_FLAGS})
+
+if (ENABLE_COLD_CACHE)
+    target_compile_definitions(ops_ggml_benchmark PRIVATE COLD_CACHE=1)
+    message(STATUS "Cold cache support enabled at compile time")
+endif()
 
 target_include_directories(ops_ggml_benchmark PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

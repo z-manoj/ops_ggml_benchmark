@@ -1,4 +1,5 @@
 #include "layer_bench.h"
+#include "cache_utils.h"
 #include "ggml_utils.h"
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -74,7 +75,8 @@ static void fill_routing_ids(struct ggml_tensor* ids, int n_experts,
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
                                   ggml_type wei_dtype, int threads,
                                   int warmup, int repeats,
-                                  ggml_type src_dtype) {
+                                  ggml_type src_dtype,
+                                  size_t cache_size) {
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
 
@@ -263,6 +265,9 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
     std::vector<std::vector<double>> op_times(cfg.ops.size());
 
     for (int i = 0; i < repeats; i++) {
+#if COLD_CACHE
+        flush_cache(cache_size);
+#endif
         auto t0 = std::chrono::steady_clock::now();
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();

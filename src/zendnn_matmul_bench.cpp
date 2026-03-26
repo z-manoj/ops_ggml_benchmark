@@ -1,6 +1,7 @@
 #include "zendnn_matmul_bench.h"
 #include "ggml_utils.h"
 #include "routing_utils.h"
+#include "cache_utils.h"
 
 #include "zendnnl.hpp"
 
@@ -188,6 +189,9 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc) {
     double sum_ms = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
+#if COLD_CACHE
+        flush_cache(desc.cache_size);
+#endif
         auto t0 = std::chrono::steady_clock::now();
 
         status_t status = matmul_direct(
@@ -528,6 +532,9 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc) {
     double sum_ms = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
+#if COLD_CACHE
+        flush_cache(desc.cache_size);
+#endif
         auto t0 = std::chrono::steady_clock::now();
 
         if (!layout.empty()) {

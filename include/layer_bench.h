@@ -41,7 +41,8 @@ struct LayerBenchResult {
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
                                   ggml_type wei_dtype, int threads,
                                   int warmup, int repeats,
-                                  ggml_type src_dtype = GGML_TYPE_F32);
+                                  ggml_type src_dtype = GGML_TYPE_F32,
+                                  size_t cache_size = 0);
 
 #ifdef ENABLE_ZENDNN
 // Run the layer benchmark described by |cfg| using ZenDNN backend.
@@ -50,7 +51,8 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
 LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
                                     ggml_type wei_dtype, int threads,
                                     int warmup, int repeats,
-                                    ggml_type src_dtype = GGML_TYPE_F32);
+                                    ggml_type src_dtype = GGML_TYPE_F32,
+                                    size_t cache_size = 0);
 #endif
 
 // Print layer benchmark results.

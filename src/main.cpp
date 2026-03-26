@@ -4,6 +4,7 @@
 #include "layer_config.h"
 #include "layer_bench.h"
 #include "moe_config.h"
+#include "cache_utils.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -137,6 +138,10 @@ int main(int argc, char** argv) {
     base.op_name = "matmul";
     base.threads = static_cast<int>(std::thread::hardware_concurrency());
     if (base.threads < 1) base.threads = 4;
+#if COLD_CACHE
+    base.cache_size = get_cache_size();
+    printf("[INFO] Cold cache enabled. Flushing %zu bytes before each evaluation.\n", base.cache_size);
+#endif
 
     std::vector<Shape> shapes;
     std::string batch_file;
@@ -329,14 +334,16 @@ int main(int argc, char** argv) {
         if (base.backend == "zendnn") {
 #ifdef ENABLE_ZENDNN
             result = bench_layer_zendnn(cfg, base.wei_dtype, base.threads,
-                                       base.warmup, base.repeats, base.src_dtype);
+                                       base.warmup, base.repeats, base.src_dtype,
+                                       base.cache_size);
 #else
             fprintf(stderr, "error: ZenDNN backend not enabled. Rebuild with -DENABLE_ZENDNN=ON\n");
             return 1;
 #endif
         } else {
             result = bench_layer_ggml(cfg, base.wei_dtype, base.threads,
-                                     base.warmup, base.repeats, base.src_dtype);
+                                     base.warmup, base.repeats, base.src_dtype,
+                                     base.cache_size);
         }
 
         print_layer_results(cfg, result, base.backend, base.wei_dtype, base.threads,
