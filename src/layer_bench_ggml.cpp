@@ -130,15 +130,15 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
 
     for (size_t i = 0; i < cfg.ops.size(); i++) {
         const auto& op = cfg.ops[i];
-        const int64_t M = op.m;
-        const int64_t N = op.n;
+        const int64_t output_features = op.m;
+        const int64_t tokens = op.n;
         const int64_t K = op.k;
 
         double flops;
 
         if (op.op_type == "mul_mat") {
-            struct ggml_tensor* a = ggml_new_tensor_2d(ctx, wei_dtype, K, N);
-            struct ggml_tensor* b = ggml_new_tensor_2d(ctx, src_dtype, K, M);
+            struct ggml_tensor* a = ggml_new_tensor_2d(ctx, wei_dtype, K, tokens);
+            struct ggml_tensor* b = ggml_new_tensor_2d(ctx, src_dtype, K, output_features);
 
             char name_a[64], name_b[64], name_c[64];
             snprintf(name_a, sizeof(name_a), "%s_A", op.label.c_str());
@@ -157,14 +157,14 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
             fill_list.push_back({a, seed_counter++, false, 0, 0, 0});
             fill_list.push_back({b, seed_counter++, false, 0, 0, 0});
 
-            flops = 2.0 * M * N * K;
+            flops = 2.0 * output_features * tokens * K;
         } else {
             const int64_t n_exp  = op.n_experts;
             const int64_t n_used = op.n_experts_used;
 
-            struct ggml_tensor* as  = ggml_new_tensor_3d(ctx, wei_dtype, K, N, n_exp);
-            struct ggml_tensor* b   = ggml_new_tensor_3d(ctx, src_dtype, K, n_used, M);
-            struct ggml_tensor* ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, M);
+            struct ggml_tensor* as  = ggml_new_tensor_3d(ctx, wei_dtype, K, tokens, n_exp);
+            struct ggml_tensor* b   = ggml_new_tensor_3d(ctx, src_dtype, K, n_used, output_features);
+            struct ggml_tensor* ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, output_features);
 
             char name_as[64], name_b[64], name_ids[64], name_c[64];
             snprintf(name_as,  sizeof(name_as),  "%s_experts", op.label.c_str());
@@ -188,14 +188,14 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
             fill_list.push_back({ids, seed_counter++, true,
                                  static_cast<int>(n_exp),
                                  static_cast<int>(n_used),
-                                 static_cast<int>(M)});
+                                 static_cast<int>(output_features)});
 
-            flops = 2.0 * M * N * K * n_used;
+            flops = 2.0 * output_features * tokens * K * n_used;
         }
 
         double gflops = flops / 1e9;
-        result.ops.push_back({op.op_type, op.label, static_cast<int>(M),
-                              static_cast<int>(N), static_cast<int>(K), gflops,
+        result.ops.push_back({op.op_type, op.label, static_cast<int>(output_features),
+                              static_cast<int>(tokens), static_cast<int>(K), gflops,
                               0.0, 0.0, 0.0, 0.0});
         result.total_gflops += gflops;
     }

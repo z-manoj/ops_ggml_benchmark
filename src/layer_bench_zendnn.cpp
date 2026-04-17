@@ -107,10 +107,10 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
     auto t_op_start = std::chrono::steady_clock::now();
 
     struct OpData {
-        std::vector<char> a_data;  // weights [N, K]
-        std::vector<char> b_data;  // input [M, K]
-        std::vector<char> c_data;  // output [M, N]
-        int64_t M, N, K;
+        std::vector<char> a_data;  // weights [tokens, K]
+        std::vector<char> b_data;  // input [output_features, K]
+        std::vector<char> c_data;  // output [output_features, tokens]
+        int64_t output_features, tokens, K;
         double gflops;
         std::string op_type;
         std::string label;
@@ -122,20 +122,20 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
 
     // Create memory and fill data for each operation
     for (const auto& op : cfg.ops) {
-        const int64_t M = op.m;
-        const int64_t N = op.n;
+        const int64_t output_features = op.m;
+        const int64_t tokens = op.n;
         const int64_t K = op.k;
 
         OpData op_data;
-        op_data.M = M;
-        op_data.N = N;
+        op_data.output_features = output_features;
+        op_data.tokens = tokens;
         op_data.K = K;
         op_data.op_type = op.op_type;
         op_data.label = op.label;
 
-        size_t a_size = N * K;
-        size_t b_size = M * K;
-        size_t c_size = M * N;
+        size_t a_size = tokens * K;
+        size_t b_size = output_features * K;
+        size_t c_size = output_features * tokens;
 
         op_data.a_data.resize(a_size * wei_elem_size);  // weights
         op_data.b_data.resize(b_size * src_elem_size);  // source/input
@@ -159,14 +159,14 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
             fill_buffer_bf16_layer(b_ptr, b_size, seed_counter++);
         }
 
-        double flops = 2.0 * M * N * K;
+        double flops = 2.0 * output_features * tokens * K;
         double gflops = flops / 1e9;
         op_data.gflops = gflops;
 
         ops.push_back(std::move(op_data));
 
         result.ops.push_back({op.op_type, op.label,
-                              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+                              static_cast<int>(output_features), static_cast<int>(tokens), static_cast<int>(K),
                               gflops, 0.0, 0.0, 0.0, 0.0});
         result.total_gflops += gflops;
     }
@@ -195,12 +195,12 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
         for (auto& op : ops) {
             status_t status = matmul_direct(
                 'r', false, true,
-                op.M, op.N, op.K,
+                op.output_features, op.tokens, op.K,
                 1.0f,
                 op.b_data.data(), op.K,
                 op.a_data.data(), op.K,
                 nullptr, 0.0f,
-                op.c_data.data(), op.N,
+                op.c_data.data(), op.tokens,
                 true,
                 batch_params,
                 params
@@ -233,12 +233,12 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
 
             status_t status = matmul_direct(
                 'r', false, true,
-                op.M, op.N, op.K,
+                op.output_features, op.tokens, op.K,
                 1.0f,
                 op.b_data.data(), op.K,
                 op.a_data.data(), op.K,
                 nullptr, 0.0f,
-                op.c_data.data(), op.N,
+                op.c_data.data(), op.tokens,
                 true,
                 batch_params,
                 params

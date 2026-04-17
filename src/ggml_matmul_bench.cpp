@@ -1,4 +1,6 @@
+
 #include "ggml_matmul_bench.h"
+
 #include "ggml_utils.h"
 #include "routing_utils.h"
 #include "ggml.h"
@@ -26,8 +28,8 @@
 // FLOPs = 2 * M * N * K
 // ---------------------------------------------------------------------------
 BenchResult bench_matmul_ggml(const OpDesc& desc) {
-    const int64_t M = desc.m;
-    const int64_t N = desc.n;
+    const int64_t output_features = desc.m;
+    const int64_t tokens = desc.n;
     const int64_t K = desc.k;
     const ggml_type src_dtype = desc.src_dtype;  // f32 or bf16
     const ggml_type wei_dtype = desc.wei_dtype;  // f32, f16, bf16, q8_0, q4_0
@@ -60,10 +62,10 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     double ctx_creation_ms = std::chrono::duration<double, std::milli>(t_ctx_end - t_ctx_start).count();
 
     // 3. Create tensors
-    //    A: weight [K, M], B: input [K, N]
+    //    A: weight [K, output_features], B: input [K, tokens]
     auto t_op_start = std::chrono::steady_clock::now();
-    struct ggml_tensor* a = ggml_new_tensor_2d(ctx, wei_dtype, K, M);
-    struct ggml_tensor* b = ggml_new_tensor_2d(ctx, src_dtype, K, N);
+    struct ggml_tensor* a = ggml_new_tensor_2d(ctx, wei_dtype, K, output_features);
+    struct ggml_tensor* b = ggml_new_tensor_2d(ctx, src_dtype, K, tokens);
     ggml_set_name(a, "A");
     ggml_set_name(b, "B");
     ggml_set_input(a);
@@ -79,10 +81,11 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
 
     // 5. Allocate tensor buffers via graph allocator
     // For q4_0, try to use repack buffer type for q4_0x8 optimization
+    // Skip repack optimization in verification mode to avoid complexity
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (wei_dtype == GGML_TYPE_Q4_0) {
+    if (wei_dtype == GGML_TYPE_Q4_0 && !desc.verify_output) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -138,8 +141,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
 
     double avg_ms = sum_ms / desc.repeats;
 
-    // TFLOPS = 2*M*N*K / avg_time_s / 1e12
-    double flops = 2.0 * M * N * K;
+    // TFLOPS = 2*output_features*tokens*K / avg_time_s / 1e12
+    double flops = 2.0 * output_features * tokens * K;
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
     BenchResult result;
@@ -152,12 +155,19 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     result.op_execution_ms = avg_ms;  // Per-iteration average
     result.other_ms = 0.0;
 
+
     // Copy output for verification if requested
     if (desc.verify_output) {
-        size_t output_size = M * N;
+        size_t output_size = output_features * tokens;
         result.output_data.resize(output_size);
-        ggml_backend_tensor_get(c, result.output_data.data(), 0, output_size * sizeof(float));
+        ggml_backend_tensor_get(c, result.output_data.data(), 0,
+                                output_size * sizeof(float));
+
+        // Also populate out_ggml so main.cpp can use it as the
+        // named baseline slot in three-way verification.
+        result.out_ggml = result.output_data;
     }
+
 
     // 9. Cleanup
     ggml_gallocr_free(allocr);
@@ -179,8 +189,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
 // FLOPs approx = 2 * M * K * n_experts_used * N
 // ---------------------------------------------------------------------------
 BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
-    const int64_t M = desc.m;
-    const int64_t N = desc.n;           // number of tokens
+    const int64_t output_features = desc.m;
+    const int64_t tokens = desc.n;           // number of tokens
     const int64_t K = desc.k;
     const int64_t n_exp = desc.n_experts;
     const int64_t n_used = desc.n_experts_used;
@@ -212,18 +222,18 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
 
     // Operator creation timing
     auto t_op_start = std::chrono::steady_clock::now();
-    // Expert weight matrices stacked: [K, M, n_experts]
-    struct ggml_tensor* as = ggml_new_tensor_3d(ctx, wei_dtype, K, M, n_exp);
+    // Expert weight matrices stacked: [K, output_features, n_experts]
+    struct ggml_tensor* as = ggml_new_tensor_3d(ctx, wei_dtype, K, output_features, n_exp);
     ggml_set_name(as, "experts");
     ggml_set_input(as);
 
-    // Input: [K, n_experts_used, N]  (3D -- ne[2]=N must match ids ne[1])
-    struct ggml_tensor* b = ggml_new_tensor_3d(ctx, src_dtype, K, n_used, N);
+    // Input: [K, n_experts_used, tokens]  (3D -- ne[2]=tokens must match ids ne[1])
+    struct ggml_tensor* b = ggml_new_tensor_3d(ctx, src_dtype, K, n_used, tokens);
     ggml_set_name(b, "input");
     ggml_set_input(b);
 
-    // Routing indices: [n_experts_used, N] (2D, i32)
-    struct ggml_tensor* ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, N);
+    // Routing indices: [n_experts_used, tokens] (2D, i32)
+    struct ggml_tensor* ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, tokens);
     ggml_set_name(ids, "ids");
     ggml_set_input(ids);
 
@@ -272,7 +282,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
 
     // Generate routing ids using shared routing utilities
     std::vector<int32_t> routing_ids = generate_routing_ids(
-        N, n_exp, n_used,
+        tokens, n_exp, n_used,
         desc.expert_token_counts,
         desc.routing_pattern,
         desc.routing_seed
@@ -303,7 +313,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     }
 
     double avg_ms = sum_ms / desc.repeats;
-    double flops = 2.0 * M * K * n_used * N;
+    double flops = 2.0 * output_features * K * n_used * tokens;
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
     BenchResult result;
@@ -318,7 +328,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
 
     // Copy output for verification if requested
     if (desc.verify_output) {
-        size_t output_size = M * n_used * N;
+        size_t output_size = output_features * n_used * tokens;
         result.output_data.resize(output_size);
         ggml_backend_tensor_get(c, result.output_data.data(), 0, output_size * sizeof(float));
     }

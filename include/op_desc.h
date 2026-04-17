@@ -13,12 +13,12 @@ struct OpDesc {
     int         m       = 512;
     int         n       = 512;
     int         k       = 512;
-
+    bool is_superblock = false;
     // Separate data types for source and weight (output is always F32)
     ggml_type   src_dtype = GGML_TYPE_F32;  // Input/source data type (f32 or bf16)
     ggml_type   wei_dtype = GGML_TYPE_F32;  // Weight data type
 
-    int         threads = 4;
+    int         threads = 96;
     int         repeats = 100;
     int         warmup  = 10;
 

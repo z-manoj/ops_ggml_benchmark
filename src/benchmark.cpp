@@ -48,7 +48,7 @@ void print_results(const OpDesc& desc, const BenchResult& result) {
     // Header
     printf("%-8s %-6s %-6s %-6s %-6s %-15s %-15s %-8s %-18s %-20s %-20s %-18s %-10s\n",
            "Backend", "M", "N", "K", "Iters", "Src_type", "Wei_type", "Threads",
-           "Avg_total(ms)", "Avg_ctx_init(ms)", "Avg_op_setup(ms)", "Avg_exec(ms)", "GFLOPS");
+           "Avg_total(ms)", "Avg_ctx_init(ms)", "Avg_op_setup(ms)", "Avg_exec(us)", "GFLOPS");
 
     // Calculate GFLOPS
     double flops;
@@ -77,7 +77,7 @@ void print_results(const OpDesc& desc, const BenchResult& result) {
            avg_total_per_iter,
            avg_ctx_per_iter,
            avg_setup_per_iter,
-           result.avg_ms,
+           result.avg_ms*1000,
            gflops);
 
     printf("\n");
