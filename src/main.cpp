@@ -617,8 +617,13 @@ int main(int argc, char** argv) {
                 // Q8_0 compound error ≈ 0.8% — use 1% tolerances.
                 double atol = 1e-2, rtol = 1e-2;
 
+                // For matmul_id the output is [tokens × n_experts_used, output_features].
+                int64_t verify_rows = (desc.op_name == "matmul_id")
+                    ? (int64_t)desc.n * desc.n_experts_used
+                    : desc.n;
+
                 pass = print_three_way_verification(
-                    /*n_rows=*/desc.n,
+                    /*n_rows=*/verify_rows,
                     /*n_cols=*/desc.m,
                     /*ldc=*/  desc.m,
                     ggml_result.out_ggml.data(),

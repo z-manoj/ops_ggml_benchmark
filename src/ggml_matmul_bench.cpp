@@ -120,6 +120,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
 
     // 7. Warmup
     for (int i = 0; i < desc.warmup; i++) {
+        
+        fill_tensor_deterministic(b, desc.data_seed + 95+i, false);  // b is always F32, no repack needed
         ggml_backend_graph_compute(backend, graph);
     }
 
@@ -129,6 +131,8 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     double sum_ms = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
+        
+        fill_tensor_deterministic(b, desc.data_seed + 95+i, false);  // b is always F32, no repack needed
         auto t0 = std::chrono::steady_clock::now();
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();
@@ -331,6 +335,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
         size_t output_size = output_features * n_used * tokens;
         result.output_data.resize(output_size);
         ggml_backend_tensor_get(c, result.output_data.data(), 0, output_size * sizeof(float));
+        result.out_ggml = result.output_data;
     }
 
     ggml_gallocr_free(allocr);

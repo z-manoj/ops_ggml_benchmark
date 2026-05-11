@@ -1029,6 +1029,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
 
         // ── 2. ZenDNN warmup ──────────────────────────────────────────────
         for (int i = 0; i < desc.warmup; i++) {
+            // Use different input data for each warmup iteration
+            fill_buffer(input_f32.data(), tokens * K, desc.data_seed + 95 + i);
             bool ok = ggml_zendnn_matmul_q8_0_f32s8(
                 desc.threads, output_features, tokens, K,
                 weights_q8.data(), input_f32.data(),
@@ -1044,6 +1046,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
         double max_ms = 0.0, sum_ms = 0.0;
 
         for (int i = 0; i < desc.repeats; i++) {
+            // Use different input data for each iteration
+            fill_buffer(input_f32.data(), tokens * K, desc.data_seed + 95 + i);
             auto t0 = std::chrono::steady_clock::now();
             bool ok = ggml_zendnn_matmul_q8_0_f32s8(
                 desc.threads, output_features, tokens, K,
@@ -1086,6 +1090,7 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
         return result;
     }
 
+    
     
     // =========================================================================
     //  Q4_0 / Q4_0x8 — ZenDNN kernel + custom kernel verify
@@ -1303,6 +1308,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
     double op_ms  = std::chrono::duration<double, std::milli>(t_op_end - t_op_start).count();
 
     for (int i = 0; i < desc.warmup; i++) {
+        
+        fill_buffer(reinterpret_cast<float*>(b_ptr), b_size, desc.data_seed + 95+i);
         status_t s = matmul_direct(
             'r', false, true, tokens, output_features, K, 1.0f,
             b_ptr, K, a_ptr, K, nullptr, 0.0f,
@@ -1316,6 +1323,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
     double max_ms = 0.0, sum_ms = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
+        
+        fill_buffer(reinterpret_cast<float*>(b_ptr), b_size, desc.data_seed + 95+i);
         auto t0 = std::chrono::steady_clock::now();
 
         status_t s = matmul_direct(
@@ -1368,11 +1377,226 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc)
     const ggml_type src_ggml      = desc.src_dtype;
     const ggml_type wei_ggml      = desc.wei_dtype;
 
+    auto t_ctx_start = std::chrono::steady_clock::now();
+        // =========================================================================
+    //  Q8_0 — per-expert ZenDNN S8×S8 kernel
+    // =========================================================================
+    if (wei_ggml == GGML_TYPE_Q8_0) {
+        if (src_ggml != GGML_TYPE_F32) {
+            fprintf(stderr, "error: Q8_0 mul_mat_id requires F32 source\n"); exit(1);
+        }
+        if (K % QK8_0 != 0) {
+            fprintf(stderr, "error: K=%ld not divisible by %d for Q8_0 mul_mat_id\n", K, QK8_0);
+            exit(1);
+        }
+
+        const int64_t num_blocks = K / QK8_0;
+
+        printf("Q8_0 ZenDNN MoE f32×S8 (dynamic quant), n_exp=%ld, n_used=%ld\n",
+               n_exp, n_used);
+
+        // ── Allocate expert weight banks ──────────────────────────────────
+        // Each expert: [output_features × num_blocks] blocks of block_q8_0
+        std::vector<std::vector<block_q8_0>> expert_weights(n_exp);
+        for (int64_t eid = 0; eid < n_exp; eid++) {
+            expert_weights[eid].resize(output_features * num_blocks);
+        }
+
+        std::vector<float> input_f32(tokens * n_used * K);
+        std::vector<float> output_f32(tokens * n_used * output_features, 0.0f);
+        std::vector<float> output_custom(tokens * n_used * output_features, 0.0f);
+
+        auto t_ctx_end = std::chrono::steady_clock::now();
+        double ctx_ms  = std::chrono::duration<double, std::milli>(
+                             t_ctx_end - t_ctx_start).count();
+
+        // ── Fill weights and input ────────────────────────────────────────
+        auto t_op_start = std::chrono::steady_clock::now();
+        {
+            // Fill all expert weights sequentially from a single seed to match
+            // bench_matmul_id_ggml, which fills the 3D weight tensor in one pass.
+            std::vector<float> tmp_all(n_exp * output_features * K);
+            fill_buffer(tmp_all.data(), n_exp * output_features * K, desc.data_seed);
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                ggml_quantize_chunk(GGML_TYPE_Q8_0,
+                                    tmp_all.data() + eid * output_features * K,
+                                    expert_weights[eid].data(),
+                                    0, output_features, K, nullptr);
+            }
+        }
+        fill_buffer(input_f32.data(), tokens * n_used * K, desc.data_seed + 95);
+
+        // ── Routing ids ───────────────────────────────────────────────────
+        std::vector<int32_t> routing_ids = generate_routing_ids(
+            tokens, n_exp, n_used,
+            desc.expert_token_counts, desc.routing_pattern, desc.routing_seed);
+
+        // Build expert→token/slot dispatch table (same pattern as F32 path)
+        struct TS { int32_t slot, token; };
+        std::vector<std::vector<TS>> e2t(n_exp);
+        for (int64_t t = 0; t < tokens; t++)
+            for (int64_t s = 0; s < n_used; s++) {
+                int32_t eid = routing_ids[t * n_used + s];
+                e2t[eid].push_back({(int32_t)s, (int32_t)t});
+            }
+
+        auto t_op_end = std::chrono::steady_clock::now();
+        double op_ms  = std::chrono::duration<double, std::milli>(
+                            t_op_end - t_op_start).count();
+
+        // Per-expert flat input/output scratch buffers (re-used each call)
+        // Maximum possible rows per expert = tokens * n_used (degenerate case)
+        std::vector<std::vector<float>> eib(n_exp), eob(n_exp);
+        for (int64_t eid = 0; eid < n_exp; eid++) {
+            int64_t nr = (int64_t)e2t[eid].size();
+            if (nr == 0) continue;
+            eib[eid].resize(nr * K);
+            eob[eid].resize(nr * output_features, 0.0f);
+        }
+
+        // ── Gather: pack routed token slices into per-expert input buffers ─
+        auto gather = [&]() {
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                const auto& tv = e2t[eid];
+                if (tv.empty()) continue;
+                float* ib = eib[eid].data();
+                for (size_t i = 0; i < tv.size(); i++) {
+                    size_t src_off = ((size_t)tv[i].token * n_used + tv[i].slot) * K;
+                    memcpy(ib + i * K, input_f32.data() + src_off, K * sizeof(float));
+                }
+            }
+        };
+
+        // ── Scatter: unpack per-expert outputs back into result tensor ────
+        auto scatter = [&]() {
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                const auto& tv = e2t[eid];
+                if (tv.empty()) continue;
+                const float* ob = eob[eid].data();
+                for (size_t i = 0; i < tv.size(); i++) {
+                    size_t dst_off = ((size_t)tv[i].token * n_used + tv[i].slot)
+                                     * output_features;
+                    memcpy(output_f32.data() + dst_off,
+                           ob + i * output_features,
+                           output_features * sizeof(float));
+                }
+            }
+        };
+
+        // ── Run one group of per-expert matmuls ───────────────────────────
+        // Each expert uses ggml_zendnn_matmul_q8_0_f32s8:
+        //   weights : block_q8_0[output_features × num_blocks]  (const)
+        //   input   : float[nr × K]
+        //   output  : float[nr × output_features]
+        auto run_experts = [&]() -> bool {
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                int64_t nr = (int64_t)e2t[eid].size();
+                if (nr == 0) continue;
+                bool ok = ggml_zendnn_matmul_q8_0_f32s8(
+                    desc.threads,
+                    output_features,       // m — weight rows
+                    nr,                    // n — token rows for this expert
+                    K,
+                    expert_weights[eid].data(),
+                    eib[eid].data(),
+                    eob[eid].data(),
+                    output_features);      // ldc
+                if (!ok) return false;
+            }
+            return true;
+        };
+
+        // ── Custom OMP verify (only when verifying) ───────────────────────
+        if (desc.verify_output) {
+            std::vector<std::vector<float>> eob_custom(n_exp);
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                int64_t nr = (int64_t)e2t[eid].size();
+                if (nr == 0) continue;
+                eob_custom[eid].resize(nr * output_features, 0.0f);
+            }
+            gather();
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                int64_t nr = (int64_t)e2t[eid].size();
+                if (nr == 0) continue;
+                bool ok = custom_matmul_q8_0(
+                    desc.threads,
+                    output_features, nr, K,
+                    expert_weights[eid].data(),
+                    eib[eid].data(),
+                    eob_custom[eid].data(),
+                    output_features);
+                if (!ok) {
+                    fprintf(stderr, "error: Q8_0 custom OMP kernel failed for mul_mat_id\n");
+                    exit(1);
+                }
+            }
+            for (int64_t eid = 0; eid < n_exp; eid++) {
+                const auto& tv = e2t[eid];
+                if (tv.empty()) continue;
+                for (size_t i = 0; i < tv.size(); i++) {
+                    size_t dst_off = ((size_t)tv[i].token * n_used + tv[i].slot)
+                                     * output_features;
+                    memcpy(output_custom.data() + dst_off,
+                           eob_custom[eid].data() + i * output_features,
+                           output_features * sizeof(float));
+                }
+            }
+        }
+
+        // ── Warmup ────────────────────────────────────────────────────────
+        for (int i = 0; i < desc.warmup; i++) {
+            gather();
+            if (!run_experts()) {
+                fprintf(stderr, "error: Q8_0 MoE ZenDNN warmup failed\n"); exit(1);
+            }
+            scatter();
+        }
+
+        // ── Timed repeats ─────────────────────────────────────────────────
+        double min_ms = std::numeric_limits<double>::max();
+        double max_ms = 0.0, sum_ms = 0.0;
+
+        for (int i = 0; i < desc.repeats; i++) {
+            auto t0 = std::chrono::steady_clock::now();
+            gather();
+            if (!run_experts()) {
+                fprintf(stderr, "error: Q8_0 MoE ZenDNN matmul failed\n"); exit(1);
+            }
+            scatter();
+            auto t1 = std::chrono::steady_clock::now();
+
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            min_ms = std::min(min_ms, ms);
+            max_ms = std::max(max_ms, ms);
+            sum_ms += ms;
+        }
+
+        double avg_ms = sum_ms / desc.repeats;
+        double tflops = (2.0 * output_features * K * n_used * tokens)
+                        / (avg_ms * 1e-3) / 1e12;
+
+        BenchResult result;
+        result.min_ms          = min_ms;
+        result.avg_ms          = avg_ms;
+        result.max_ms          = max_ms;
+        result.tflops          = tflops;
+        result.ctx_creation_ms = ctx_ms;
+        result.op_creation_ms  = op_ms;
+        result.op_execution_ms = avg_ms;
+        result.other_ms        = 0.0;
+
+        if (desc.verify_output) {
+            result.out_custom  = output_custom;
+            result.out_zendnn  = output_f32;
+            result.output_data = output_f32;
+        }
+
+        return result;
+    }
+
     zendnnl::common::data_type_t src_dt = ggml_type_to_zendnn(src_ggml);
     zendnnl::common::data_type_t wei_dt = ggml_type_to_zendnn(wei_ggml);
     zendnnl::common::data_type_t dst_dt = zendnnl::common::data_type_t::f32;
-
-    auto t_ctx_start = std::chrono::steady_clock::now();
 
     size_t expert_size = K * output_features;
     size_t input_size  = K * n_used * tokens;
