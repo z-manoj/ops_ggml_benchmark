@@ -85,7 +85,7 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (wei_dtype == GGML_TYPE_Q4_0 && !desc.verify_output) {
+    if (wei_dtype == GGML_TYPE_Q4_0 && !desc.verify_output && !desc.no_repack) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -103,6 +103,11 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
                 }
             }
         }
+    }
+
+    if (wei_dtype == GGML_TYPE_Q4_0) {
+        fprintf(stderr, "[GGML] q4_0 kernel: %s\n",
+                using_repack ? "repacked (q4_0x8)" : "plain (block_q4_0)");
     }
 
     ggml_gallocr_t allocr = ggml_gallocr_new(buft);
@@ -125,38 +130,38 @@ BenchResult bench_matmul_ggml(const OpDesc& desc) {
         ggml_backend_graph_compute(backend, graph);
     }
 
-    // 8. Timed iterations
-    double min_ms = std::numeric_limits<double>::max();
-    double max_ms = 0.0;
-    double sum_ms = 0.0;
+    // 8. Timed iterations -- measured directly in microseconds for precision
+    double min_us = std::numeric_limits<double>::max();
+    double max_us = 0.0;
+    double sum_us = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
-        
+
         fill_tensor_deterministic(b, desc.data_seed + 95+i, false);  // b is always F32, no repack needed
         auto t0 = std::chrono::steady_clock::now();
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();
 
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        min_ms = std::min(min_ms, ms);
-        max_ms = std::max(max_ms, ms);
-        sum_ms += ms;
+        double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        min_us = std::min(min_us, us);
+        max_us = std::max(max_us, us);
+        sum_us += us;
     }
 
-    double avg_ms = sum_ms / desc.repeats;
+    double avg_us = sum_us / desc.repeats;
 
     // TFLOPS = 2*output_features*tokens*K / avg_time_s / 1e12
     double flops = 2.0 * output_features * tokens * K;
-    double tflops = flops / (avg_ms * 1e-3) / 1e12;
+    double tflops = flops / (avg_us * 1e-6) / 1e12;
 
     BenchResult result;
-    result.min_ms = min_ms;
-    result.avg_ms = avg_ms;
-    result.max_ms = max_ms;
+    result.min_us = min_us;
+    result.avg_us = avg_us;
+    result.max_us = max_us;
     result.tflops = tflops;
     result.ctx_creation_ms = ctx_creation_ms;
     result.op_creation_ms = op_creation_ms;
-    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.op_execution_us = avg_us;  // Per-iteration average
     result.other_ms = 0.0;
 
 
@@ -253,7 +258,7 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (wei_dtype == GGML_TYPE_Q4_0) {
+    if (wei_dtype == GGML_TYPE_Q4_0 && !desc.no_repack) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -271,6 +276,11 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
                 }
             }
         }
+    }
+
+    if (wei_dtype == GGML_TYPE_Q4_0) {
+        fprintf(stderr, "[GGML] q4_0 kernel: %s\n",
+                using_repack ? "repacked (q4_0x8)" : "plain (block_q4_0)");
     }
 
     ggml_gallocr_t allocr = ggml_gallocr_new(buft);
@@ -300,34 +310,34 @@ BenchResult bench_matmul_id_ggml(const OpDesc& desc) {
         ggml_backend_graph_compute(backend, graph);
     }
 
-    // Timed iterations
-    double min_ms = std::numeric_limits<double>::max();
-    double max_ms = 0.0;
-    double sum_ms = 0.0;
+    // Timed iterations -- measured directly in microseconds for precision
+    double min_us = std::numeric_limits<double>::max();
+    double max_us = 0.0;
+    double sum_us = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
         auto t0 = std::chrono::steady_clock::now();
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();
 
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        min_ms = std::min(min_ms, ms);
-        max_ms = std::max(max_ms, ms);
-        sum_ms += ms;
+        double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        min_us = std::min(min_us, us);
+        max_us = std::max(max_us, us);
+        sum_us += us;
     }
 
-    double avg_ms = sum_ms / desc.repeats;
+    double avg_us = sum_us / desc.repeats;
     double flops = 2.0 * output_features * K * n_used * tokens;
-    double tflops = flops / (avg_ms * 1e-3) / 1e12;
+    double tflops = flops / (avg_us * 1e-6) / 1e12;
 
     BenchResult result;
-    result.min_ms = min_ms;
-    result.avg_ms = avg_ms;
-    result.max_ms = max_ms;
+    result.min_us = min_us;
+    result.avg_us = avg_us;
+    result.max_us = max_us;
     result.tflops = tflops;
     result.ctx_creation_ms = ctx_creation_ms;
     result.op_creation_ms = op_creation_ms;
-    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.op_execution_us = avg_us;  // Per-iteration average
     result.other_ms = 0.0;
 
     // Copy output for verification if requested

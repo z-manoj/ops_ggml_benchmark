@@ -74,7 +74,8 @@ static void fill_routing_ids(struct ggml_tensor* ids, int n_experts,
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
                                   ggml_type wei_dtype, int threads,
                                   int warmup, int repeats,
-                                  ggml_type src_dtype) {
+                                  ggml_type src_dtype,
+                                  bool no_repack) {
     // Track timing breakdowns
     auto t_ctx_start = std::chrono::steady_clock::now();
 
@@ -204,7 +205,7 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
     bool using_repack = false;
 
-    if (wei_dtype == GGML_TYPE_Q4_0) {
+    if (wei_dtype == GGML_TYPE_Q4_0 && !no_repack) {
         ggml_backend_dev_t cpu_dev = ggml_backend_get_device(backend);
         if (cpu_dev) {
             ggml_backend_reg_t cpu_reg = ggml_backend_dev_backend_reg(cpu_dev);
@@ -222,6 +223,11 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
                 }
             }
         }
+    }
+
+    if (wei_dtype == GGML_TYPE_Q4_0) {
+        fprintf(stderr, "[GGML] q4_0 kernel: %s\n",
+                using_repack ? "repacked (q4_0x8)" : "plain (block_q4_0)");
     }
 
     ggml_gallocr_t allocr = ggml_gallocr_new(buft);
@@ -254,10 +260,10 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
         ggml_backend_graph_compute(backend, graph);
     }
 
-    // Timed iterations - measure total and per-op
-    double min_ms = std::numeric_limits<double>::max();
-    double max_ms = 0.0;
-    double sum_ms = 0.0;
+    // Timed iterations - measure total and per-op, in microseconds for precision
+    double min_us = std::numeric_limits<double>::max();
+    double max_us = 0.0;
+    double sum_us = 0.0;
 
     // Per-op timing accumulators
     std::vector<std::vector<double>> op_times(cfg.ops.size());
@@ -267,33 +273,33 @@ LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
         ggml_backend_graph_compute(backend, graph);
         auto t1 = std::chrono::steady_clock::now();
 
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        min_ms = std::min(min_ms, ms);
-        max_ms = std::max(max_ms, ms);
-        sum_ms += ms;
+        double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        min_us = std::min(min_us, us);
+        max_us = std::max(max_us, us);
+        sum_us += us;
     }
 
-    double avg_ms = sum_ms / repeats;
+    double avg_us = sum_us / repeats;
 
     // Compute aggregate throughput
-    result.min_ms = min_ms;
-    result.avg_ms = avg_ms;
-    result.max_ms = max_ms;
-    result.tflops = (result.total_gflops * 1e9) / (avg_ms * 1e-3) / 1e12;
+    result.min_us = min_us;
+    result.avg_us = avg_us;
+    result.max_us = max_us;
+    result.tflops = (result.total_gflops * 1e9) / (avg_us * 1e-6) / 1e12;
 
     // Set timing breakdowns (all per-iteration averages)
     result.ctx_creation_ms = ctx_creation_ms;
     result.op_creation_ms = op_creation_ms;
-    result.op_execution_ms = avg_ms;  // Per-iteration average
+    result.op_execution_us = avg_us;  // Per-iteration average
     result.other_ms = 0.0;
 
     // Estimate per-op times (proportional to GFLOPs)
     for (size_t i = 0; i < result.ops.size(); i++) {
         double proportion = result.ops[i].gflops / result.total_gflops;
-        result.ops[i].avg_ms = avg_ms * proportion;
-        result.ops[i].min_ms = min_ms * proportion;
-        result.ops[i].max_ms = max_ms * proportion;
-        result.ops[i].tflops = (result.ops[i].gflops * 1e9) / (result.ops[i].avg_ms * 1e-3) / 1e12;
+        result.ops[i].avg_us = avg_us * proportion;
+        result.ops[i].min_us = min_us * proportion;
+        result.ops[i].max_us = max_us * proportion;
+        result.ops[i].tflops = (result.ops[i].gflops * 1e9) / (result.ops[i].avg_us * 1e-6) / 1e12;
     }
 
     // Cleanup

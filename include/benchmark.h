@@ -4,13 +4,15 @@
 #include "op_desc.h"
 
 struct BenchResult {
-    double min_ms          = 0.0;
-    double avg_ms          = 0.0;
-    double max_ms          = 0.0;
+    // Timed execution loop -- measured directly in microseconds (not derived
+    // from a millisecond value) for sub-millisecond precision on fast kernels.
+    double min_us          = 0.0;
+    double avg_us          = 0.0;
+    double max_us          = 0.0;
     double tflops          = 0.0;
     double ctx_creation_ms = 0.0;
     double op_creation_ms  = 0.0;
-    double op_execution_ms = 0.0;
+    double op_execution_us = 0.0;
     double other_ms        = 0.0;
 
     // Primary output — always populated when verify_output=true.

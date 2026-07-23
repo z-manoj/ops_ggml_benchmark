@@ -59,12 +59,12 @@ void print_results(const OpDesc& desc, const BenchResult& result) {
         // For regular matmul: FLOPs = 2 * M * N * K
         flops = 2.0 * desc.m * desc.n * desc.k;
     }
-    double gflops = flops / (result.avg_ms * 1e-3) / 1e9;
+    double gflops = flops / (result.avg_us * 1e-6) / 1e9;
 
     // Amortize one-time costs across all iterations for fair comparison
     double avg_ctx_per_iter = result.ctx_creation_ms / desc.repeats;
     double avg_setup_per_iter = result.op_creation_ms / desc.repeats;
-    double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + result.avg_ms;
+    double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + (result.avg_us / 1000.0);
 
     // Data row
     printf("%-8s %-6d %-6d %-6d %-6d %-15s %-15s %-8d %-18.2f %-20.2f %-20.2f %-18.2f %-18.2f\n",
@@ -77,7 +77,7 @@ void print_results(const OpDesc& desc, const BenchResult& result) {
            avg_total_per_iter,
            avg_ctx_per_iter,
            avg_setup_per_iter,
-           result.avg_ms*1000,
+           result.avg_us,
            gflops);
 
     printf("\n");
@@ -97,8 +97,8 @@ void write_csv_results(const std::string& csv_path, const OpDesc& desc,
     if (write_header) {
         csv_file << "Backend,M,N,K,Iterations,Src_type,Wei_type,Threads,"
                  << "Avg_total_ms,GFLOPS,"
-                 << "Avg_ctx_init_ms,Avg_op_setup_ms,Avg_exec_ms,"
-                 << "Exec_min_ms,Exec_max_ms\n";
+                 << "Avg_ctx_init_ms,Avg_op_setup_ms,Avg_exec_us,"
+                 << "Exec_min_us,Exec_max_us\n";
     }
 
     // Calculate metrics - amortize one-time costs for fair comparison
@@ -110,11 +110,11 @@ void write_csv_results(const std::string& csv_path, const OpDesc& desc,
         // For regular matmul: FLOPs = 2 * M * N * K
         flops = 2.0 * desc.m * desc.n * desc.k;
     }
-    double gflops = flops / (result.avg_ms * 1e-3) / 1e9;
+    double gflops = flops / (result.avg_us * 1e-6) / 1e9;
 
     double avg_ctx_per_iter = result.ctx_creation_ms / desc.repeats;
     double avg_setup_per_iter = result.op_creation_ms / desc.repeats;
-    double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + result.avg_ms;
+    double avg_total_per_iter = avg_ctx_per_iter + avg_setup_per_iter + (result.avg_us / 1000.0);
 
     // Write data row
     csv_file << desc.backend << ","
@@ -127,8 +127,8 @@ void write_csv_results(const std::string& csv_path, const OpDesc& desc,
              << gflops << ","
              << avg_ctx_per_iter << ","
              << avg_setup_per_iter << ","
-             << result.avg_ms << ","
-             << result.min_ms << "," << result.max_ms << "\n";
+             << result.avg_us << ","
+             << result.min_us << "," << result.max_us << "\n";
 
     csv_file.close();
 }

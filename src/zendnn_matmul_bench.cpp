@@ -1042,8 +1042,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
         }
 
         // ── 3. Timed ZenDNN repeats ───────────────────────────────────────
-        double min_ms = std::numeric_limits<double>::max();
-        double max_ms = 0.0, sum_ms = 0.0;
+        double min_us = std::numeric_limits<double>::max();
+        double max_us = 0.0, sum_us = 0.0;
 
         for (int i = 0; i < desc.repeats; i++) {
             // Use different input data for each iteration
@@ -1058,26 +1058,25 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
                 fprintf(stderr, "error: Q8_0 ZenDNN matmul failed\n");
                 exit(1);
             }
-            double ms = std::chrono::duration<double, std::milli>(
-                            t1 - t0).count();
-            min_ms = std::min(min_ms, ms);
-            max_ms = std::max(max_ms, ms);
-            sum_ms += ms;
+            double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+            min_us = std::min(min_us, us);
+            max_us = std::max(max_us, us);
+            sum_us += us;
         }
 
-        double avg_ms = sum_ms / desc.repeats;
+        double avg_us = sum_us / desc.repeats;
         double tflops = (2.0 * output_features * tokens * K)
-                        / (avg_ms * 1e-3) / 1e12;
+                        / (avg_us * 1e-6) / 1e12;
 
         // ── 4. Pack result ────────────────────────────────────────────────
         BenchResult result;
-        result.min_ms          = min_ms;
-        result.avg_ms          = avg_ms;
-        result.max_ms          = max_ms;
+        result.min_us          = min_us;
+        result.avg_us          = avg_us;
+        result.max_us          = max_us;
         result.tflops          = tflops;
         result.ctx_creation_ms = ctx_ms;
         result.op_creation_ms  = op_ms;
-        result.op_execution_ms = avg_ms;
+        result.op_execution_us = avg_us;
         result.other_ms        = 0.0;
 
         // output_data = ZenDNN result (backward compat for two-way path)
@@ -1136,8 +1135,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
                 if (!ok) { fprintf(stderr, "error: Q4_0x8 ZenDNN warmup\n"); exit(1); }
             }
 
-            double min_ms = std::numeric_limits<double>::max();
-            double max_ms = 0.0, sum_ms = 0.0;
+            double min_us = std::numeric_limits<double>::max();
+            double max_us = 0.0, sum_us = 0.0;
 
             for (int i = 0; i < desc.repeats; i++) {
                 auto t0 = std::chrono::steady_clock::now();
@@ -1148,21 +1147,21 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
                 auto t1 = std::chrono::steady_clock::now();
                 if (!ok) { fprintf(stderr, "error: Q4_0x8 ZenDNN matmul\n"); exit(1); }
 
-                double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                min_ms = std::min(min_ms, ms);
-                max_ms = std::max(max_ms, ms);
-                sum_ms += ms;
+                double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+                min_us = std::min(min_us, us);
+                max_us = std::max(max_us, us);
+                sum_us += us;
             }
 
-            double avg_ms = sum_ms / desc.repeats;
-            double tflops = (2.0 * output_features * tokens * K) / (avg_ms * 1e-3) / 1e12;
+            double avg_us = sum_us / desc.repeats;
+            double tflops = (2.0 * output_features * tokens * K) / (avg_us * 1e-6) / 1e12;
 
             BenchResult result;
-            result.min_ms = min_ms; result.avg_ms = avg_ms;
-            result.max_ms = max_ms; result.tflops = tflops;
+            result.min_us = min_us; result.avg_us = avg_us;
+            result.max_us = max_us; result.tflops = tflops;
             result.ctx_creation_ms = ctx_ms;
             result.op_creation_ms  = op_ms;
-            result.op_execution_ms = avg_ms;
+            result.op_execution_us = avg_us;
             result.other_ms        = 0.0;
 
             if (desc.verify_output) {
@@ -1215,8 +1214,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
                 if (!ok) { fprintf(stderr, "error: Q4_0 ZenDNN warmup\n"); exit(1); }
             }
 
-            double min_ms = std::numeric_limits<double>::max();
-            double max_ms = 0.0, sum_ms = 0.0;
+            double min_us = std::numeric_limits<double>::max();
+            double max_us = 0.0, sum_us = 0.0;
 
             for (int i = 0; i < desc.repeats; i++) {
                 auto t0 = std::chrono::steady_clock::now();
@@ -1230,21 +1229,21 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
                 auto t1 = std::chrono::steady_clock::now();
                 if (!ok) { fprintf(stderr, "error: Q4_0 ZenDNN matmul\n"); exit(1); }
 
-                double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                min_ms = std::min(min_ms, ms);
-                max_ms = std::max(max_ms, ms);
-                sum_ms += ms;
+                double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+                min_us = std::min(min_us, us);
+                max_us = std::max(max_us, us);
+                sum_us += us;
             }
 
-            double avg_ms = sum_ms / desc.repeats;
-            double tflops = (2.0 * output_features * tokens * K) / (avg_ms * 1e-3) / 1e12;
+            double avg_us = sum_us / desc.repeats;
+            double tflops = (2.0 * output_features * tokens * K) / (avg_us * 1e-6) / 1e12;
 
             BenchResult result;
-            result.min_ms = min_ms; result.avg_ms = avg_ms;
-            result.max_ms = max_ms; result.tflops = tflops;
+            result.min_us = min_us; result.avg_us = avg_us;
+            result.max_us = max_us; result.tflops = tflops;
             result.ctx_creation_ms = ctx_ms;
             result.op_creation_ms  = op_ms;
-            result.op_execution_ms = avg_ms;
+            result.op_execution_us = avg_us;
             result.other_ms        = 0.0;
 
             if (desc.verify_output) {
@@ -1319,8 +1318,8 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
         }
     }
 
-    double min_ms = std::numeric_limits<double>::max();
-    double max_ms = 0.0, sum_ms = 0.0;
+    double min_us = std::numeric_limits<double>::max();
+    double max_us = 0.0, sum_us = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
         
@@ -1337,21 +1336,21 @@ BenchResult bench_matmul_zendnn(const OpDesc& desc)
             fprintf(stderr, "error: ZenDNN matmul\n"); exit(1);
         }
 
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        min_ms = std::min(min_ms, ms);
-        max_ms = std::max(max_ms, ms);
-        sum_ms += ms;
+        double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        min_us = std::min(min_us, us);
+        max_us = std::max(max_us, us);
+        sum_us += us;
     }
 
-    double avg_ms = sum_ms / desc.repeats;
-    double tflops = (2.0 * output_features * tokens * K) / (avg_ms * 1e-3) / 1e12;
+    double avg_us = sum_us / desc.repeats;
+    double tflops = (2.0 * output_features * tokens * K) / (avg_us * 1e-6) / 1e12;
 
     BenchResult result;
-    result.min_ms = min_ms; result.avg_ms = avg_ms;
-    result.max_ms = max_ms; result.tflops = tflops;
+    result.min_us = min_us; result.avg_us = avg_us;
+    result.max_us = max_us; result.tflops = tflops;
     result.ctx_creation_ms = ctx_ms;
     result.op_creation_ms  = op_ms;
-    result.op_execution_ms = avg_ms;
+    result.op_execution_us = avg_us;
     result.other_ms        = 0.0;
 
     if (desc.verify_output) {
@@ -1553,8 +1552,8 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc)
         }
 
         // ── Timed repeats ─────────────────────────────────────────────────
-        double min_ms = std::numeric_limits<double>::max();
-        double max_ms = 0.0, sum_ms = 0.0;
+        double min_us = std::numeric_limits<double>::max();
+        double max_us = 0.0, sum_us = 0.0;
 
         for (int i = 0; i < desc.repeats; i++) {
             auto t0 = std::chrono::steady_clock::now();
@@ -1565,24 +1564,24 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc)
             scatter();
             auto t1 = std::chrono::steady_clock::now();
 
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            min_ms = std::min(min_ms, ms);
-            max_ms = std::max(max_ms, ms);
-            sum_ms += ms;
+            double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+            min_us = std::min(min_us, us);
+            max_us = std::max(max_us, us);
+            sum_us += us;
         }
 
-        double avg_ms = sum_ms / desc.repeats;
+        double avg_us = sum_us / desc.repeats;
         double tflops = (2.0 * output_features * K * n_used * tokens)
-                        / (avg_ms * 1e-3) / 1e12;
+                        / (avg_us * 1e-6) / 1e12;
 
         BenchResult result;
-        result.min_ms          = min_ms;
-        result.avg_ms          = avg_ms;
-        result.max_ms          = max_ms;
+        result.min_us          = min_us;
+        result.avg_us          = avg_us;
+        result.max_us          = max_us;
         result.tflops          = tflops;
         result.ctx_creation_ms = ctx_ms;
         result.op_creation_ms  = op_ms;
-        result.op_execution_ms = avg_ms;
+        result.op_execution_us = avg_us;
         result.other_ms        = 0.0;
 
         if (desc.verify_output) {
@@ -1727,8 +1726,8 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc)
         }
     }
 
-    double min_ms = std::numeric_limits<double>::max();
-    double max_ms = 0.0, sum_ms = 0.0;
+    double min_us = std::numeric_limits<double>::max();
+    double max_us = 0.0, sum_us = 0.0;
 
     for (int i = 0; i < desc.repeats; i++) {
         auto t0 = std::chrono::steady_clock::now();
@@ -1744,21 +1743,21 @@ BenchResult bench_matmul_id_zendnn(const OpDesc& desc)
             scatter();
         }
         auto t1 = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1-t0).count();
-        min_ms = std::min(min_ms,ms);
-        max_ms = std::max(max_ms,ms);
-        sum_ms += ms;
+        double us = std::chrono::duration<double, std::micro>(t1-t0).count();
+        min_us = std::min(min_us,us);
+        max_us = std::max(max_us,us);
+        sum_us += us;
     }
 
-    double avg_ms = sum_ms / desc.repeats;
-    double tflops = (2.0*output_features*K*n_used*tokens) / (avg_ms*1e-3) / 1e12;
+    double avg_us = sum_us / desc.repeats;
+    double tflops = (2.0*output_features*K*n_used*tokens) / (avg_us * 1e-6) / 1e12;
 
     BenchResult result;
-    result.min_ms = min_ms; result.avg_ms = avg_ms;
-    result.max_ms = max_ms; result.tflops = tflops;
+    result.min_us = min_us; result.avg_us = avg_us;
+    result.max_us = max_us; result.tflops = tflops;
     result.ctx_creation_ms = ctx_ms;
     result.op_creation_ms  = op_ms;
-    result.op_execution_ms = avg_ms;
+    result.op_execution_us = avg_us;
     result.other_ms        = 0.0;
 
     if (desc.verify_output) {

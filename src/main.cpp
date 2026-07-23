@@ -101,6 +101,8 @@ static void print_usage(const char* prog) {
         "  --routing_seed <int>\n"
         "  --seed <int>\n"
         "  --verify                  Three-way output verification\n"
+        "  --no_repack               Disable q4_0 auto-repack; use plain block_q4_0 kernel\n"
+        "                            instead of the interleaved q4_0x8 kernel (ggml only)\n"
         "  --help\n",
         prog);
 }
@@ -500,6 +502,7 @@ int main(int argc, char** argv) {
                 base.expert_token_counts.push_back(atoi(tok.c_str()));
         }
         else if (arg("--verify")) { base.verify_output = true; }
+        else if (arg("--no_repack")) { base.no_repack = true; }
         else if (arg("--help") || arg("-h")) { print_usage(argv[0]); return 0; }
         else {
             fprintf(stderr, "error: unknown argument '%s'\n", argv[i]);
@@ -530,7 +533,8 @@ int main(int argc, char** argv) {
 #endif
         } else {
             result = bench_layer_ggml(cfg, base.wei_dtype, base.threads,
-                                      base.warmup, base.repeats, base.src_dtype);
+                                      base.warmup, base.repeats, base.src_dtype,
+                                      base.no_repack);
         }
         print_layer_results(cfg, result, base.backend, base.wei_dtype,
                             base.threads, base.warmup, base.repeats);

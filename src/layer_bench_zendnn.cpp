@@ -215,9 +215,9 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
     }
 
     // Timed iterations: measure total and per-op times
-    double total_min_ms = std::numeric_limits<double>::max();
-    double total_max_ms = 0.0;
-    double total_sum_ms = 0.0;
+    double total_min_us = std::numeric_limits<double>::max();
+    double total_max_us = 0.0;
+    double total_sum_us = 0.0;
 
     // Per-op timing storage
     std::vector<std::vector<double>> op_times(ops.size());
@@ -252,44 +252,44 @@ LayerBenchResult bench_layer_zendnn(const LayerConfig& cfg,
                 exit(1);
             }
 
-            double op_ms = std::chrono::duration<double, std::milli>(op_t1 - op_t0).count();
-            op_times[i].push_back(op_ms);
+            double op_us = std::chrono::duration<double, std::micro>(op_t1 - op_t0).count();
+            op_times[i].push_back(op_us);
         }
 
         auto iter_t1 = std::chrono::steady_clock::now();
-        double iter_ms = std::chrono::duration<double, std::milli>(iter_t1 - iter_t0).count();
-        total_min_ms = std::min(total_min_ms, iter_ms);
-        total_max_ms = std::max(total_max_ms, iter_ms);
-        total_sum_ms += iter_ms;
+        double iter_us = std::chrono::duration<double, std::micro>(iter_t1 - iter_t0).count();
+        total_min_us = std::min(total_min_us, iter_us);
+        total_max_us = std::max(total_max_us, iter_us);
+        total_sum_us += iter_us;
     }
 
-    double total_avg_ms = total_sum_ms / repeats;
+    double total_avg_us = total_sum_us / repeats;
 
     // Compute per-op statistics
     for (size_t i = 0; i < result.ops.size(); i++) {
         const auto& times = op_times[i];
-        double min_ms = *std::min_element(times.begin(), times.end());
-        double max_ms = *std::max_element(times.begin(), times.end());
-        double sum_ms = 0.0;
-        for (double t : times) sum_ms += t;
-        double avg_ms = sum_ms / repeats;
+        double min_us = *std::min_element(times.begin(), times.end());
+        double max_us = *std::max_element(times.begin(), times.end());
+        double sum_us = 0.0;
+        for (double t : times) sum_us += t;
+        double avg_us = sum_us / repeats;
 
-        result.ops[i].min_ms = min_ms;
-        result.ops[i].avg_ms = avg_ms;
-        result.ops[i].max_ms = max_ms;
-        result.ops[i].tflops = (result.ops[i].gflops * 1e9) / (avg_ms * 1e-3) / 1e12;
+        result.ops[i].min_us = min_us;
+        result.ops[i].avg_us = avg_us;
+        result.ops[i].max_us = max_us;
+        result.ops[i].tflops = (result.ops[i].gflops * 1e9) / (avg_us * 1e-6) / 1e12;
     }
 
     // Aggregate results
-    result.min_ms = total_min_ms;
-    result.avg_ms = total_avg_ms;
-    result.max_ms = total_max_ms;
-    result.tflops = (result.total_gflops * 1e9) / (total_avg_ms * 1e-3) / 1e12;
+    result.min_us = total_min_us;
+    result.avg_us = total_avg_us;
+    result.max_us = total_max_us;
+    result.tflops = (result.total_gflops * 1e9) / (total_avg_us * 1e-6) / 1e12;
 
     // Set timing breakdowns (all per-iteration averages)
     result.ctx_creation_ms = ctx_creation_ms;
     result.op_creation_ms = op_creation_ms;
-    result.op_execution_ms = total_avg_ms;  // Per-iteration average
+    result.op_execution_us = total_avg_us;  // Per-iteration average
     result.other_ms = 0.0;
 
     return result;

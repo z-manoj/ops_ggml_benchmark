@@ -14,9 +14,9 @@ struct LayerOpResult {
     int         n      = 0;
     int         k      = 0;
     double      gflops = 0.0;  // GFLOPs for this single op
-    double      min_ms = 0.0;  // Min time for this op across repeats
-    double      avg_ms = 0.0;  // Avg time for this op across repeats
-    double      max_ms = 0.0;  // Max time for this op across repeats
+    double      min_us = 0.0;  // Min time for this op across repeats
+    double      avg_us = 0.0;  // Avg time for this op across repeats
+    double      max_us = 0.0;  // Max time for this op across repeats
     double      tflops = 0.0;  // Throughput for this op
 };
 
@@ -24,15 +24,17 @@ struct LayerOpResult {
 struct LayerBenchResult {
     std::vector<LayerOpResult> ops;
     double total_gflops = 0.0;
-    double min_ms       = 0.0;
-    double avg_ms       = 0.0;
-    double max_ms       = 0.0;
+    // Timed execution loop -- measured directly in microseconds (not derived
+    // from a millisecond value) for sub-millisecond precision on fast kernels.
+    double min_us       = 0.0;
+    double avg_us       = 0.0;
+    double max_us       = 0.0;
     double tflops       = 0.0;
 
     // Timing breakdowns (ZenDNN benchdnn format)
     double ctx_creation_ms = 0.0;
     double op_creation_ms  = 0.0;
-    double op_execution_ms = 0.0;
+    double op_execution_us = 0.0;
     double other_ms        = 0.0;
 };
 
@@ -41,7 +43,8 @@ struct LayerBenchResult {
 LayerBenchResult bench_layer_ggml(const LayerConfig& cfg,
                                   ggml_type wei_dtype, int threads,
                                   int warmup, int repeats,
-                                  ggml_type src_dtype = GGML_TYPE_F32);
+                                  ggml_type src_dtype = GGML_TYPE_F32,
+                                  bool no_repack = false);
 
 #ifdef ENABLE_ZENDNN
 // Run the layer benchmark described by |cfg| using ZenDNN backend.

@@ -37,4 +37,8 @@ struct OpDesc {
 
     // Verification mode
     bool        verify_output = false;            // save output data for comparison
+
+    // q4_0 repack control: when true, forces the plain (non-interleaved) q4_0
+    // kernel instead of auto-upgrading to the repacked q4_0x8 layout.
+    bool        no_repack = false;
 };
